@@ -637,6 +637,17 @@ function App() {
 
   const REQUEST_METHODS = ["GET", "POST", "PUT", "FETCH", "DELETE"];
 
+  // Create API form fields
+  const [apiName, setApiName] = useState("");
+  const [apiPassword, setApiPassword] = useState("");
+  const [savingApi, setSavingApi] = useState(false);
+
+  // Saved backend APIs
+  const [backendApis, setBackendApis] = useState([]);
+  const [backendApisLoading, setBackendApisLoading] = useState(false);
+  const [selectedBackendApi, setSelectedBackendApi] = useState(null);
+  const [backendApiFormValues, setBackendApiFormValues] = useState({});
+
   const [relations, setRelations] = useState(null);
   const [relationsLoading, setRelationsLoading] = useState(false);
 
@@ -803,10 +814,86 @@ function App() {
     }
   };
 
+  const fetchBackendApis = async () => {
+    try {
+      setBackendApisLoading(true);
+      const res = await fetch(`${API_BASE_URL}/api/backend-apis`);
+      if (!res.ok) await handleFetchError(res);
+      const data = await res.json();
+      const list = data.data || [];
+      setBackendApis(list);
+      if (list.length && !selectedBackendApi) {
+        setSelectedBackendApi(list[0]);
+      }
+    } catch (err) {
+      console.error(err);
+      setError(err.message);
+    } finally {
+      setBackendApisLoading(false);
+    }
+  };
+
+  const saveBackendApi = async () => {
+    if (!apiName) {
+      setError("API name is required.");
+      return;
+    }
+    if (!selectedDb || !selectedCollection) {
+      setError("Select a database and collection before saving an API.");
+      return;
+    }
+    try {
+      setSavingApi(true);
+      setError(null);
+      const res = await fetch(`${API_BASE_URL}/api/backend-apis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_name: apiName,
+          password: apiPassword,
+          columns,
+          request: requestMethod,
+          dbName: selectedDb,
+          collectionName: selectedCollection,
+          payloadSample: apiFormValues,
+        }),
+      });
+      if (!res.ok) await handleFetchError(res);
+      const data = await res.json();
+      setShowApiModal(false);
+      setApiName("");
+      setApiPassword("");
+      await fetchBackendApis();
+      if (data?.data) setSelectedBackendApi(data.data);
+    } catch (err) {
+      console.error(err);
+      setError(err.message);
+    } finally {
+      setSavingApi(false);
+    }
+  };
+
+  const deleteBackendApi = async (id) => {
+    if (!id) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/backend-apis/${id}`, { method: "DELETE" });
+      if (!res.ok) await handleFetchError(res);
+      await fetchBackendApis();
+      if (selectedBackendApi?._id === id) {
+        setSelectedBackendApi(null);
+        setBackendApiFormValues({});
+      }
+    } catch (err) {
+      console.error(err);
+      setError(err.message);
+    }
+  };
+
   useEffect(() => {
     fetchHealth();
     fetchDatabases();
     fetchRelations();
+    fetchBackendApis();
   }, []);
 
   useEffect(() => {
@@ -841,6 +928,35 @@ function App() {
     });
   }, [columns]);
 
+  // Columns to hide from the request body UI (system / meta fields)
+  const BODY_FIELD_EXCLUDE = new Set([
+    "_id",
+    "id",
+    "__v",
+    "createdAt",
+    "updatedAt",
+    "created_at",
+    "updated_at",
+  ]);
+
+  // Columns shown in the request body form (exclude system/meta fields)
+  const bodyColumns = columns.filter((c) => !BODY_FIELD_EXCLUDE.has(c));
+
+  // Sync saved API form values when selection changes
+  useEffect(() => {
+    if (selectedBackendApi) {
+      const cols = selectedBackendApi.columns || [];
+      const payload = selectedBackendApi.payloadSample || {};
+      const next = {};
+      cols.forEach((c) => {
+        next[c] = payload?.[c] ?? "";
+      });
+      setBackendApiFormValues(next);
+    } else {
+      setBackendApiFormValues({});
+    }
+  }, [selectedBackendApi]);
+
   const healthStatusColor =
     health?.status === "healthy"
       ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40"
@@ -853,6 +969,22 @@ function App() {
       ...prev,
       [column]: value,
     }));
+  };
+
+  const handleBackendApiFieldChange = (column, value) => {
+    setBackendApiFormValues((prev) => ({
+      ...prev,
+      [column]: value,
+    }));
+  };
+
+  const loadBackendApiData = () => {
+    if (!selectedBackendApi?.dbName || !selectedBackendApi?.collectionName) {
+      setError("Saved API is missing database or collection info.");
+      return;
+    }
+    fetchDocuments(selectedBackendApi.dbName, selectedBackendApi.collectionName, docsLimit);
+    fetchColumns(selectedBackendApi.dbName, selectedBackendApi.collectionName);
   };
 
   const flattenObject = (obj, prefix = "", res = {}) => {
@@ -1004,17 +1136,12 @@ function App() {
                   <input
                     type="text"
                     placeholder="API name"
+                    value={apiName}
+                    onChange={(e) => setApiName(e.target.value)}
                     className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
                   />
                 </div>
-                <div>
-                  <label className="text-[11px] text-slate-400 block mb-1">Password</label>
-                  <input
-                    type="password"
-                    placeholder="********"
-                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
-                  />
-                </div> 
+                
                 <div className="flex-1 overflow-auto rounded-xl border border-slate-800 bg-slate-900/50 p-3 max-h-[60vh]">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-slate-200">Columns</span>
@@ -1069,64 +1196,34 @@ function App() {
                     </div>
                   </div>
                   <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-[12px] text-slate-200 space-y-3 max-h-[220px] overflow-auto">
-                    {columns.length === 0 ? (
-                      <p className="text-[11px] text-slate-500">No fields available. Select a collection.</p>
-                    ) : (
-                      columns.map((col) => (
-                        <div key={col} className="flex flex-col gap-1">
-                          <label className="text-[11px] text-slate-400 font-medium">{col}</label>
-                          <input
-                            type="text"
-                            value={apiFormValues[col] ?? ""}
-                            onChange={(e) => handleFieldChange(col, e.target.value)}
-                            placeholder={`Enter ${col}`}
-                            className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
-                          />
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 flex-1 overflow-hidden flex flex-col">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-sm font-semibold text-slate-200">Table</h4>
-                    <button
-                      onClick={() =>
-                        selectedDb &&
-                        selectedCollection &&
-                        Promise.all([
-                          fetchDocuments(selectedDb, selectedCollection, docsLimit),
-                          fetchColumns(selectedDb, selectedCollection),
-                        ])
-                      }
-                      disabled={!selectedDb || !selectedCollection}
-                      className="text-[11px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-medium hover:bg-slate-700 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-auto border border-dashed border-slate-800 rounded-xl bg-slate-900/50 p-3 max-h-[40vh]">
-                    {documentsLoading ? (
-                      <div className="flex flex-col items-center justify-center h-full gap-2">
-                        <div className="h-6 w-6 animate-spin rounded-full border-2 border-sky-500 border-t-transparent"></div>
-                        <p className="text-xs text-slate-500">Loading documents…</p>
-                      </div>
-                    ) : documents.length === 0 ? (
-                      <p className="text-xs text-slate-500">No data to display.</p>
-                    ) : (
-                      renderDocumentsTable(documents)
-                    )}
+                      {columns.length === 0 ? (
+                        <p className="text-[11px] text-slate-500">No fields available. Select a collection.</p>
+                      ) : (
+                        // Only render non-system columns in the request body section
+                        bodyColumns.map((col) => (
+                          <div key={col} className="flex flex-col gap-1">
+                            <label className="text-[11px] text-slate-400 font-medium">{col}</label>
+                            <input
+                              type="text"
+                              value={apiFormValues[col] ?? ""}
+                              onChange={(e) => handleFieldChange(col, e.target.value)}
+                              placeholder={`Enter ${col}`}
+                              className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                            />
+                          </div>
+                        ))
+                      )}
                   </div>
                 </div>
               </div>
             </div>
             <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 flex justify-end">
               <button
-                onClick={() => setShowApiModal(false)}
-                className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition"
+                onClick={saveBackendApi}
+                disabled={savingApi}
+                className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Save
+                {savingApi ? "Saving..." : "Save"}
               </button>
             </div>
           </div>
@@ -1409,6 +1506,134 @@ function App() {
                      </div>
                    </div>
                 </div>
+
+              {/* Saved Backend APIs */}
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/60 shadow-sm flex flex-col lg:col-span-2">
+                <div className="border-b border-slate-800 px-4 py-3 flex flex-wrap items-center justify-between gap-2 bg-slate-900/60 rounded-t-2xl">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-200">Saved APIs</h2>
+                    <p className="text-[11px] text-slate-500">Request method locked to saved value.</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={fetchBackendApis}
+                      className="text-[11px] rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-medium hover:bg-slate-800 transition"
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      onClick={() => setShowApiModal(true)}
+                      className="text-[11px] rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 font-medium text-emerald-100 hover:bg-emerald-500/20 transition"
+                    >
+                      + New API
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-12 gap-4 p-4 min-h-[420px]">
+                  {/* List */}
+                  <div className="col-span-12 md:col-span-4 lg:col-span-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 flex flex-col gap-2 max-h-[420px] overflow-auto">
+                    {backendApisLoading ? (
+                      <p className="text-[11px] text-slate-500 italic">Loading saved APIs…</p>
+                    ) : backendApis.length === 0 ? (
+                      <p className="text-[11px] text-slate-500">No saved APIs. Create one to begin.</p>
+                    ) : (
+                      backendApis.map((api) => (
+                        <div
+                          key={api._id}
+                          className={classNames(
+                            "rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-2 cursor-pointer transition",
+                            selectedBackendApi?._id === api._id
+                              ? "border-sky-500/60 bg-sky-500/10 text-sky-100"
+                              : "border-slate-800 bg-slate-900 hover:border-slate-600"
+                          )}
+                          onClick={() => setSelectedBackendApi(api)}
+                        >
+                          <div className="flex flex-col truncate">
+                            <span className="font-semibold truncate">{api.api_name}</span>
+                            <span className="text-[10px] text-slate-400">{api.request}</span>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteBackendApi(api._id);
+                            }}
+                            className="text-[10px] text-red-300 hover:text-red-200"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Detail */}
+                  <div className="col-span-12 md:col-span-8 lg:col-span-9 rounded-xl border border-slate-800 bg-slate-900/60 p-4 flex flex-col gap-4 min-h-[420px]">
+                    {!selectedBackendApi ? (
+                      <p className="text-[12px] text-slate-400">Select a saved API to view details.</p>
+                    ) : (
+                      <>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-1 text-xs font-semibold text-slate-200">
+                              Request: {selectedBackendApi.request}
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              {selectedBackendApi.dbName || "N/A"} / {selectedBackendApi.collectionName || "N/A"}
+                            </span>
+                          </div>
+                          <button
+                            onClick={loadBackendApiData}
+                            className="text-[11px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-medium hover:bg-slate-700 transition"
+                          >
+                            Load Data
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 max-h-[280px] overflow-auto">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-xs font-semibold text-slate-200">Columns</span>
+                              <span className="text-[10px] text-slate-500">Locked</span>
+                            </div>
+                            {(selectedBackendApi.columns || []).length === 0 ? (
+                              <p className="text-[11px] text-slate-500">No columns stored.</p>
+                            ) : (
+                              <ul className="space-y-1 text-[12px] text-slate-200">
+                                {selectedBackendApi.columns.map((col) => (
+                                  <li key={col} className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 flex items-center gap-2">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                                    <span className="font-mono truncate">{col}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+
+                          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 max-h-[280px] overflow-auto space-y-3">
+                            {(selectedBackendApi.columns || []).length === 0 ? (
+                              <p className="text-[11px] text-slate-500">No fields to populate.</p>
+                            ) : (
+                              selectedBackendApi.columns.map((col) => (
+                                <div key={col} className="flex flex-col gap-1">
+                                  <label className="text-[11px] text-slate-400 font-medium">{col}</label>
+                                  <input
+                                    type="text"
+                                    value={backendApiFormValues[col] ?? ""}
+                                    onChange={(e) => handleBackendApiFieldChange(col, e.target.value)}
+                                    placeholder={`Enter ${col}`}
+                                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                                  />
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
 
               </div>
             </section>
