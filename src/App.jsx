@@ -1014,7 +1014,7 @@ function App() {
                     placeholder="********"
                     className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
                   />
-                </div>
+                </div> 
                 <div className="flex-1 overflow-auto rounded-xl border border-slate-800 bg-slate-900/50 p-3 max-h-[60vh]">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-slate-200">Columns</span>
