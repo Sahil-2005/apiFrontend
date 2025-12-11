@@ -983,8 +983,47 @@ function App() {
       setError("Saved API is missing database or collection info.");
       return;
     }
+    setSelectedDb(selectedBackendApi.dbName);
+    setSelectedCollection(selectedBackendApi.collectionName);
     fetchDocuments(selectedBackendApi.dbName, selectedBackendApi.collectionName, docsLimit);
     fetchColumns(selectedBackendApi.dbName, selectedBackendApi.collectionName);
+  };
+
+  const executeBackendApi = async () => {
+    if (!selectedBackendApi) {
+      setError("Select a saved API to execute.");
+      return;
+    }
+
+    try {
+      setError(null);
+      const res = await fetch(
+        `${API_BASE_URL}/api/backend-apis/${selectedBackendApi._id}/execute`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            payload: backendApiFormValues,
+            limit: docsLimit,
+          }),
+        }
+      );
+      if (!res.ok) await handleFetchError(res);
+      const data = await res.json();
+
+      // Update table with latest data
+      if (Array.isArray(data.data)) {
+        setDocuments(data.data);
+      } else if (data.data) {
+        setDocuments([data.data]);
+      }
+
+      // Reload collection data if inserts happened
+      loadBackendApiData();
+    } catch (err) {
+      console.error(err);
+      setError(err.message);
+    }
   };
 
   const flattenObject = (obj, prefix = "", res = {}) => {
@@ -1587,6 +1626,12 @@ function App() {
                             className="text-[11px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-medium hover:bg-slate-700 transition"
                           >
                             Load Data
+                          </button>
+                          <button
+                            onClick={executeBackendApi}
+                            className="text-[11px] rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 font-medium text-emerald-100 hover:bg-emerald-500/20 transition"
+                          >
+                            Execute
                           </button>
                         </div>
 
