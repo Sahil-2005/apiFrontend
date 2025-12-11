@@ -627,11 +627,24 @@ function App() {
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [docsLimit, setDocsLimit] = useState(10);
 
+  // Columns for selected collection (used in Create API modal)
+  const [columns, setColumns] = useState([]);
+  const [columnsLoading, setColumnsLoading] = useState(false);
+
+  // Request method dropdown & form values
+  const [requestMethod, setRequestMethod] = useState("GET");
+  const [apiFormValues, setApiFormValues] = useState({});
+
+  const REQUEST_METHODS = ["GET", "POST", "PUT", "FETCH", "DELETE"];
+
   const [relations, setRelations] = useState(null);
   const [relationsLoading, setRelationsLoading] = useState(false);
 
   // New state for viewing a single document in full
   const [viewingDoc, setViewingDoc] = useState(null);
+
+  // Create API modal visibility
+  const [showApiModal, setShowApiModal] = useState(false);
 
   const [error, setError] = useState(null);
 
@@ -731,6 +744,27 @@ function App() {
     }
   };
 
+  const fetchColumns = async (dbName, collectionName) => {
+    if (!dbName || !collectionName) return;
+    try {
+      setColumnsLoading(true);
+      setError(null);
+      const params = new URLSearchParams({
+        dbName,
+        collectionName,
+      });
+      const res = await fetch(`${API_BASE_URL}/api/introspect/colums?${params.toString()}`);
+      if (!res.ok) await handleFetchError(res);
+      const data = await res.json();
+      setColumns(data.columns || []);
+    } catch (err) {
+      console.error(err);
+      setError(err.message);
+    } finally {
+      setColumnsLoading(false);
+    }
+  };
+
   const fetchDocuments = async (dbName, collectionName, limit = 10) => {
     if (!dbName || !collectionName) return;
     try {
@@ -788,11 +822,24 @@ function App() {
   useEffect(() => {
     if (selectedDb && selectedCollection) {
       fetchDocuments(selectedDb, selectedCollection, docsLimit);
+      fetchColumns(selectedDb, selectedCollection);
     } else {
       setDocuments([]);
+      setColumns([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCollection, docsLimit]);
+
+  // Keep form inputs in sync with available columns
+  useEffect(() => {
+    setApiFormValues((prev) => {
+      const next = {};
+      columns.forEach((col) => {
+        next[col] = prev?.[col] ?? "";
+      });
+      return next;
+    });
+  }, [columns]);
 
   const healthStatusColor =
     health?.status === "healthy"
@@ -800,6 +847,13 @@ function App() {
       : "bg-red-500/10 text-red-300 border-red-500/40";
 
   // -------- HELPER FUNCTIONS --------
+
+  const handleFieldChange = (column, value) => {
+    setApiFormValues((prev) => ({
+      ...prev,
+      [column]: value,
+    }));
+  };
 
   const flattenObject = (obj, prefix = "", res = {}) => {
     for (const key in obj) {
@@ -929,6 +983,155 @@ function App() {
     <div className="min-h-screen bg-slate-950 text-slate-50 font-sans selection:bg-sky-500/30">
       {/* Detail Modal */}
       {viewingDoc && <DocumentModal doc={viewingDoc} onClose={() => setViewingDoc(null)} />}
+      {/* Create API Modal */}
+      {showApiModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-6xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 bg-slate-900">
+              <h3 className="text-sm font-semibold text-slate-200">Create API</h3>
+              <button
+                onClick={() => setShowApiModal(false)}
+                className="rounded hover:bg-slate-800 p-1 text-slate-400 hover:text-white transition"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 grid grid-cols-12 gap-4 p-4 overflow-auto">
+              {/* Left: columns list */}
+              <div className="col-span-3 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 flex flex-col gap-4">
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-1">Name</label>
+                  <input
+                    type="text"
+                    placeholder="API name"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-1">Password</label>
+                  <input
+                    type="password"
+                    placeholder="********"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                  />
+                </div>
+                <div className="flex-1 overflow-auto rounded-xl border border-slate-800 bg-slate-900/50 p-3 max-h-[60vh]">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-slate-200">Columns</span>
+                    {columnsLoading && <span className="text-[10px] text-sky-400">Loading…</span>}
+                  </div>
+                  {columns.length === 0 && !columnsLoading ? (
+                    <p className="text-[11px] text-slate-500">
+                      {selectedDb && selectedCollection
+                        ? "No columns detected in this collection."
+                        : "Select a database and collection first."}
+                    </p>
+                  ) : (
+                    <ul className="space-y-1 text-[12px] text-slate-200">
+                      {columns.map((col) => (
+                        <li
+                          key={col}
+                          className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 flex items-center gap-2"
+                        >
+                          <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                          <span className="font-mono truncate">{col}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {/* Right: request body & table */}
+              <div className="col-span-9 flex flex-col gap-4 overflow-hidden">
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <span className="px-3 py-1 rounded-lg border border-slate-800 bg-slate-900 text-xs font-semibold text-slate-200">
+                        Request
+                      </span>
+                      <select
+                        value={requestMethod}
+                        onChange={(e) => setRequestMethod(e.target.value)}
+                        className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
+                      >
+                        {REQUEST_METHODS.map((method) => (
+                          <option key={method} value={method}>
+                            {method}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {selectedDb && selectedCollection
+                        ? `${selectedDb} / ${selectedCollection}`
+                        : "Select DB & Collection"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-[12px] text-slate-200 space-y-3 max-h-[220px] overflow-auto">
+                    {columns.length === 0 ? (
+                      <p className="text-[11px] text-slate-500">No fields available. Select a collection.</p>
+                    ) : (
+                      columns.map((col) => (
+                        <div key={col} className="flex flex-col gap-1">
+                          <label className="text-[11px] text-slate-400 font-medium">{col}</label>
+                          <input
+                            type="text"
+                            value={apiFormValues[col] ?? ""}
+                            onChange={(e) => handleFieldChange(col, e.target.value)}
+                            placeholder={`Enter ${col}`}
+                            className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                          />
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 flex-1 overflow-hidden flex flex-col">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-sm font-semibold text-slate-200">Table</h4>
+                    <button
+                      onClick={() =>
+                        selectedDb &&
+                        selectedCollection &&
+                        Promise.all([
+                          fetchDocuments(selectedDb, selectedCollection, docsLimit),
+                          fetchColumns(selectedDb, selectedCollection),
+                        ])
+                      }
+                      disabled={!selectedDb || !selectedCollection}
+                      className="text-[11px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-medium hover:bg-slate-700 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-auto border border-dashed border-slate-800 rounded-xl bg-slate-900/50 p-3 max-h-[40vh]">
+                    {documentsLoading ? (
+                      <div className="flex flex-col items-center justify-center h-full gap-2">
+                        <div className="h-6 w-6 animate-spin rounded-full border-2 border-sky-500 border-t-transparent"></div>
+                        <p className="text-xs text-slate-500">Loading documents…</p>
+                      </div>
+                    ) : documents.length === 0 ? (
+                      <p className="text-xs text-slate-500">No data to display.</p>
+                    ) : (
+                      renderDocumentsTable(documents)
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 flex justify-end">
+              <button
+                onClick={() => setShowApiModal(false)}
+                className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_transparent_45%),_radial-gradient(circle_at_bottom,_rgba(129,140,248,0.12),_transparent_45%)]" />
 
@@ -978,6 +1181,23 @@ function App() {
                 className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium hover:bg-slate-800 transition"
               >
                 <span className="text-sm">⟳</span> Refresh
+              </button>
+
+              <button
+                onClick={() => {
+                  if (!selectedDb || !selectedCollection) {
+                    setError("Select a database and collection before creating an API.");
+                    return;
+                  }
+                  fetchColumns(selectedDb, selectedCollection);
+                  if (documents.length === 0) {
+                    fetchDocuments(selectedDb, selectedCollection, docsLimit);
+                  }
+                  setShowApiModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/60 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-100 hover:bg-sky-500/20 transition"
+              >
+                Create API
               </button>
 
               <div
