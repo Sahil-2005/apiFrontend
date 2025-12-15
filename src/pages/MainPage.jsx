@@ -1186,8 +1186,97 @@ export default function MainPage() {
   const fetchColumns = async (dbName, collectionName) => { 
       if (!dbName || !collectionName) return; try { setColumnsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/colums?dbName=${dbName}&collectionName=${collectionName}`); const data = await res.json(); setColumns(data.columns || []); } catch(e){ setColumns([]); } finally { setColumnsLoading(false); }
   };
-  const fetchDocuments = async (dbName, collectionName, limit=10) => {
-      if (!dbName || !collectionName) return; try { setDocumentsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${collectionName}&limit=${limit}`); const data = await res.json(); setDocuments(data.documents || []); } catch(e) { setDocuments([]); } finally { setDocumentsLoading(false); }
+  // const fetchDocuments = async (dbName, collectionName, limit=10) => {
+  //     if (!dbName || !collectionName) return; try { setDocumentsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${collectionName}&limit=${limit}`); const data = await res.json(); setDocuments(data.documents || []); } catch(e) { setDocuments([]); } finally { setDocumentsLoading(false); }
+  // };
+  const fetchDocuments = async (dbName, collectionName, limit = 10) => {
+    if (!dbName || !collectionName) return;
+
+    try {
+      setDocumentsLoading(true);
+
+      // 1. Fetch the main documents
+      const res = await debugFetch(
+        `${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${collectionName}&limit=${limit}`
+      );
+      const data = await res.json();
+      let mainDocs = data.documents || [];
+
+      // 2. Identify potential relationships (Convention: fieldName ending in "Id")
+      // Example: "userId" -> implies relation to "users" collection
+      if (mainDocs.length > 0) {
+        const sample = mainDocs[0];
+        const relationMap = {}; // stores mapping: { fieldName: targetCollection }
+
+        Object.keys(sample).forEach((key) => {
+          if (key.endsWith("Id") && key !== "_id") {
+            // "userId" -> "user" -> "users" (Pluralize convention)
+            const baseName = key.slice(0, -2); 
+            // Simple pluralization: add 's'. 
+            // Note: complex names like 'category' -> 'categories' might need a library like 'pluralize'
+            relationMap[key] = baseName + "s"; 
+          }
+        });
+
+        // 3. Fetch related data if relations found
+        if (Object.keys(relationMap).length > 0) {
+            // Create a queue of promises to fetch related data
+            const populationPromises = Object.entries(relationMap).map(async ([fieldKey, targetCollection]) => {
+                
+                // Collect all unique IDs for this field from the mainDocs
+                const idsToFetch = [...new Set(mainDocs.map(doc => doc[fieldKey]).filter(id => id))];
+                
+                if (idsToFetch.length === 0) return;
+
+                // Create a filter to fetch only these IDs
+                // Filter format: { "_id": { "$in": ["id1", "id2"] } }
+                const filter = JSON.stringify({
+                    _id: { $in: idsToFetch }
+                });
+
+                try {
+                    const relRes = await debugFetch(
+                        `${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${targetCollection}&limit=${idsToFetch.length}&filter=${encodeURIComponent(filter)}`
+                    );
+                    const relData = await relRes.json();
+                    const relatedDocs = relData.documents || [];
+
+                    // Create a lookup map for faster access: { id: document }
+                    const lookup = relatedDocs.reduce((acc, doc) => {
+                        acc[doc._id] = doc;
+                        return acc;
+                    }, {});
+
+                    // 4. Attach the related data to the main documents
+                    mainDocs = mainDocs.map(doc => {
+                        const foreignKey = doc[fieldKey];
+                        if (lookup[foreignKey]) {
+                            // Embed the full object. 
+                            // e.g. doc.user = { _id:..., name: "John" }
+                            // We remove the 'Id' suffix for the new key (userId -> user)
+                            const newKey = fieldKey.slice(0, -2); 
+                            return { ...doc, [newKey]: lookup[foreignKey] };
+                        }
+                        return doc;
+                    });
+
+                } catch (err) {
+                    console.warn(`Failed to populate ${targetCollection}:`, err);
+                    // Fail silently and keep original data
+                }
+            });
+
+            await Promise.all(populationPromises);
+        }
+      }
+
+      setDocuments(mainDocs);
+    } catch (e) {
+      console.error(e);
+      setDocuments([]);
+    } finally {
+      setDocumentsLoading(false);
+    }
   };
   const fetchBackendApis = async () => {
       try { setBackendApisLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/backend-apis`); const data = await res.json(); setBackendApis(data.data || []); } catch(e){ setBackendApis([]); } finally { setBackendApisLoading(false); }
@@ -1567,7 +1656,17 @@ export default function MainPage() {
                     </div>
                     <div className="p-4">{documentsLoading ? <p className="text-xs text-slate-500 text-center">Loading...</p> : documents.length === 0 ? <p className="text-xs text-slate-500 text-center">Empty.</p> : renderDocumentsTable(documents)}</div>
                  </div>
-
+{/* <div className="grid grid-cols-1 md:grid-cols-2 gap-6"> */}
+                {/* Relations */}
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/50 shadow-sm flex flex-col h-[200px]">
+                  <div className="border-b border-slate-800 px-4 py-3 flex items-center justify-between bg-slate-900/50 rounded-t-2xl">
+                    <h2 className="text-sm font-semibold text-slate-200">Mongoose Relations</h2>
+                    <button onClick={fetchRelations} className="text-[10px] text-slate-400 hover:text-white transition">Refresh</button>
+                  </div>
+                  <div className="p-3 overflow-auto flex-1 custom-scrollbar">
+                    {relationsLoading ? <p className="text-xs text-slate-400 italic p-2">Loading relations…</p> : !relations || Object.keys(relations).length === 0 ? <div className="h-full flex items-center justify-center text-center"><p className="text-xs text-slate-600">No schema relations detected.</p></div> : (<table className="w-full text-left text-xs"><tbody className="divide-y divide-slate-800/50">{Object.entries(relations).map(([modelName, refs]) => (<tr key={modelName}><td className="py-2 pr-3 align-top font-medium text-sky-200/80">{modelName}</td><td className="py-2">{Array.isArray(refs) && refs.length > 0 ? (<div className="flex flex-wrap gap-1.5">{refs.map((ref, idx) => (<span key={idx} className="inline-flex items-center rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300 border border-slate-700">→ {ref}</span>))}</div>) : (<span className="text-[10px] text-slate-600">-</span>)}</td></tr>))}</tbody></table>)}
+                  </div>
+                </div>
                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                      {/* Saved APIs List - Unchanged Logic */}
                     <div className="rounded-2xl border border-slate-800 bg-slate-950/60 shadow-sm flex flex-col lg:col-span-2">
