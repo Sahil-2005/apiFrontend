@@ -1119,9 +1119,13 @@ export default function MainPage() {
 
   // Request form and methods
   const [requestMethod, setRequestMethod] = useState("GET");
+  // NEW: Aggregation method (only used when requestMethod === "GET")
+  const [aggregationMethod, setAggregationMethod] = useState("NONE");
   const [apiFormValues, setApiFormValues] = useState({});
-  // UPDATED: Added aggregate methods
-  const REQUEST_METHODS = ["GET", "POST", "PUT", "DELETE", "FETCH", "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_BY"];
+  // HTTP / logical request methods
+  const REQUEST_METHODS = ["GET", "POST", "PUT", "DELETE", "FETCH"];
+  // Aggregation functions selectable when GET is chosen
+  const AGGREGATION_METHODS = ["NONE", "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_BY"];
 
   // Create API form fields (modal)
   const [apiName, setApiName] = useState("");
@@ -1305,21 +1309,32 @@ export default function MainPage() {
         api_name: apiName,
         password: apiPassword,
         columns,
-        request: requestMethod,
+        request: requestMethod, // stays as HTTP-like method (GET/POST/PUT/DELETE/FETCH)
         dbName: selectedDb,
         collectionName: selectedCollection,
         payloadSample: apiFormValues,
         meta: {},
       };
 
-      // Save matchField for PUT, DELETE, FETCH, and Aggregates (they can all use filters)
-      if (["PUT", "DELETE", "FETCH", "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(requestMethod)) {
+      // Save matchField for PUT, DELETE, FETCH, and GET+Aggregation (they can all use filters)
+      if (
+        ["PUT", "DELETE", "FETCH"].includes(requestMethod) ||
+        (requestMethod === "GET" && aggregationMethod && aggregationMethod !== "NONE")
+      ) {
         body.meta.matchField = modalMatchField || "_id";
       }
 
-      // Save aggregateField for SUM, AVG, MIN, MAX, GROUP_BY
-      if (["SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(requestMethod)) {
+      // Save aggregation configuration only when GET has an aggregation selected
+      if (
+        requestMethod === "GET" &&
+        aggregationMethod &&
+        aggregationMethod !== "NONE"
+      ) {
+        body.meta.aggregationMethod = aggregationMethod;
+        // For SUM, AVG, MIN, MAX, GROUP_BY we also need an aggregate target field
+        if (["SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(aggregationMethod)) {
           body.meta.aggregateField = modalAggregateField;
+        }
       }
 
       const res = await debugFetch(`${API_BASE_URL}/api/backend-apis`, {
@@ -1540,8 +1555,11 @@ export default function MainPage() {
                   <input type="text" placeholder="API name" value={apiName} onChange={(e) => setApiName(e.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" />
                 </div>
 
-                {/* Match field selector - Extended for Aggregates */}
-                {(["PUT","DELETE","FETCH","COUNT","SUM","AVG","MIN","MAX","GROUP_BY"].includes(requestMethod)) && (
+                {/* Match field selector - for PUT / DELETE / FETCH and GET with Aggregation */}
+                {(
+                  ["PUT","DELETE","FETCH"].includes(requestMethod) ||
+                  (requestMethod === "GET" && aggregationMethod && aggregationMethod !== "NONE")
+                ) && (
                   <div>
                     <label className="text-[11px] text-slate-400 block mb-1">Filter By (Match Field)</label>
                     <select value={modalMatchField} onChange={(e) => setModalMatchField(e.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500">
@@ -1552,8 +1570,8 @@ export default function MainPage() {
                   </div>
                 )}
 
-                {/* NEW: Aggregate Target Field Selector */}
-                {(["SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(requestMethod)) && (
+                {/* Aggregate Target Field Selector (only when GET + aggregation that needs a field) */}
+                {(requestMethod === "GET" && ["SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(aggregationMethod)) && (
                   <div>
                     <label className="text-[11px] text-emerald-400 block mb-1">Target Field ({requestMethod})</label>
                     <select value={modalAggregateField} onChange={(e) => setModalAggregateField(e.target.value)} className="w-full rounded-lg border border-emerald-900 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-emerald-500">
@@ -1561,7 +1579,7 @@ export default function MainPage() {
                       {columns.map((c) => <option key={c} value={c}>{c}</option>)}
                     </select>
                     <p className="text-[10px] text-slate-500 mt-1">
-                        {requestMethod === "GROUP_BY" ? "Field to group results by." : `Field to calculate ${requestMethod} on.`}
+                        {aggregationMethod === "GROUP_BY" ? "Field to group results by." : `Field to calculate ${aggregationMethod} on.`}
                     </p>
                   </div>
                 )}
@@ -1581,9 +1599,35 @@ export default function MainPage() {
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
                       <span className="px-3 py-1 rounded-lg border border-slate-800 bg-slate-900 text-xs font-semibold text-slate-200">Request</span>
-                      <select value={requestMethod} onChange={(e) => setRequestMethod(e.target.value)} className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500">
-                        {REQUEST_METHODS.map((method) => (<option key={method} value={method}>{method}</option>))}
+                      <select
+                        value={requestMethod}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setRequestMethod(value);
+                          // Reset aggregation selection when leaving GET
+                          if (value !== "GET") {
+                            setAggregationMethod("NONE");
+                          }
+                        }}
+                        className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
+                      >
+                        {REQUEST_METHODS.map((method) => (
+                          <option key={method} value={method}>{method}</option>
+                        ))}
                       </select>
+
+                      {/* Aggregation dropdown: only visible when GET is selected */}
+                      {requestMethod === "GET" && (
+                        <select
+                          value={aggregationMethod}
+                          onChange={(e) => setAggregationMethod(e.target.value)}
+                          className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-emerald-500"
+                        >
+                          {AGGREGATION_METHODS.map((agg) => (
+                            <option key={agg} value={agg}>{agg}</option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                     <div className="text-[11px] text-slate-500">{selectedDb && selectedCollection ? `${selectedDb} / ${selectedCollection}` : "Select DB & Collection"}</div>
                   </div>
