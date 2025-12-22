@@ -1144,6 +1144,13 @@ export default function MainPage() {
 
   const [viewingDoc, setViewingDoc] = useState(null);
   const [showApiModal, setShowApiModal] = useState(false);
+  // NEW: Create DB/Collection modal state
+  const [showCreateDbModal, setShowCreateDbModal] = useState(false);
+  const [newDbName, setNewDbName] = useState("");
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newSchemaFieldInput, setNewSchemaFieldInput] = useState("");
+  const [newSchemaFields, setNewSchemaFields] = useState([]);
+  const [creatingDb, setCreatingDb] = useState(false);
   const [error, setError] = useState(null);
 
   // Match-field selection in create modal (for criteria)
@@ -1189,6 +1196,67 @@ export default function MainPage() {
   };
   const fetchColumns = async (dbName, collectionName) => { 
       if (!dbName || !collectionName) return; try { setColumnsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/colums?dbName=${dbName}&collectionName=${collectionName}`); const data = await res.json(); setColumns(data.columns || []); } catch(e){ setColumns([]); } finally { setColumnsLoading(false); }
+  };
+
+  // ---------- Create DB + Collection ----------
+  const handleAddSchemaField = () => {
+    const trimmed = (newSchemaFieldInput || "").trim();
+    if (!trimmed) return;
+    if (!newSchemaFields.includes(trimmed)) {
+      setNewSchemaFields((prev) => [...prev, trimmed]);
+    }
+    setNewSchemaFieldInput("");
+  };
+
+  const handleRemoveSchemaField = (field) => {
+    setNewSchemaFields((prev) => prev.filter((f) => f !== field));
+  };
+
+  const handleCreateDbAndCollection = async () => {
+    if (!newDbName || !newCollectionName) {
+      setError("Database name and collection name are required.");
+      return;
+    }
+    try {
+      setCreatingDb(true);
+      setError(null);
+
+      const body = {
+        dbName: newDbName,
+        collectionName: newCollectionName,
+        schemaFields: newSchemaFields,
+      };
+
+      const res = await debugFetch(`${API_BASE_URL}/api/introspect/create-db`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `Request failed with status ${res.status}`);
+      }
+
+      // Refresh DB/collections and close modal
+      await fetchDatabases();
+      if (newDbName) {
+        await fetchCollections(newDbName);
+        setSelectedDb(newDbName);
+        setSelectedCollection(newCollectionName);
+      }
+
+      setShowCreateDbModal(false);
+      setNewDbName("");
+      setNewCollectionName("");
+      setNewSchemaFieldInput("");
+      setNewSchemaFields([]);
+    } catch (err) {
+      console.error("[create-db] error", err);
+      setError(err.message || String(err));
+    } finally {
+      setCreatingDb(false);
+    }
   };
   // const fetchDocuments = async (dbName, collectionName, limit=10) => {
   //     if (!dbName || !collectionName) return; try { setDocumentsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${collectionName}&limit=${limit}`); const data = await res.json(); setDocuments(data.documents || []); } catch(e) { setDocuments([]); } finally { setDocumentsLoading(false); }
@@ -1650,7 +1718,108 @@ export default function MainPage() {
         </div>
       )}
 
-      {/* Main UI Structure (Header, Sidebar, Main) - Unchanged layout logic */}
+      {/* Create DB / Collection Modal */}
+      {showCreateDbModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 bg-slate-900">
+              <h3 className="text-sm font-semibold text-slate-200">Create Database & Collection</h3>
+              <button
+                onClick={() => setShowCreateDbModal(false)}
+                className="rounded hover:bg-slate-800 p-1 text-slate-400 hover:text-white transition"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4 space-y-4 overflow-auto">
+              <div>
+                <label className="text-[11px] text-slate-400 block mb-1">Database Name</label>
+                <input
+                  type="text"
+                  value={newDbName}
+                  onChange={(e) => setNewDbName(e.target.value)}
+                  placeholder="e.g. analytics_db"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-slate-400 block mb-1">Collection Name</label>
+                <input
+                  type="text"
+                  value={newCollectionName}
+                  onChange={(e) => setNewCollectionName(e.target.value)}
+                  placeholder="e.g. events"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-slate-400 block mb-1">Schema Fields (optional)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={newSchemaFieldInput}
+                    onChange={(e) => setNewSchemaFieldInput(e.target.value)}
+                    placeholder="fieldName"
+                    className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddSchemaField();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddSchemaField}
+                    className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500"
+                  >
+                    Add
+                  </button>
+                </div>
+                {newSchemaFields.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {newSchemaFields.map((field) => (
+                      <span
+                        key={field}
+                        className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-slate-100 border border-slate-700"
+                      >
+                        {field}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveSchemaField(field)}
+                          className="text-slate-400 hover:text-red-300"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-500 mt-1">
+                  These fields describe what you want to keep in this collection; they are stored as metadata for the dashboard.
+                </p>
+              </div>
+            </div>
+            <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 flex justify-end gap-2">
+              <button
+                onClick={() => setShowCreateDbModal(false)}
+                className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateDbAndCollection}
+                disabled={creatingDb}
+                className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+              >
+                {creatingDb ? "Creating..." : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main UI Structure (Header, Sidebar, Main) */}
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_transparent_45%),_radial-gradient(circle_at_bottom,_rgba(129,140,248,0.12),_transparent_45%)]" />
       <div className="relative z-10">
         <header className="border-b border-slate-800/70 bg-slate-950/80 backdrop-blur sticky top-0 z-40">
@@ -1666,7 +1835,27 @@ export default function MainPage() {
                   </div>
               </div>
               <div className="flex flex-col items-end gap-2">
-                 <button onClick={() => { if (!selectedDb || !selectedCollection) { setError("Select a database."); return; } fetchColumns(selectedDb, selectedCollection); setShowApiModal(true); }} className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/60 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-100">+ API</button>
+                 <div className="flex gap-2">
+                   <button
+                     onClick={() => setShowCreateDbModal(true)}
+                     className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-500/20"
+                   >
+                     + Create DB
+                   </button>
+                   <button
+                     onClick={() => {
+                       if (!selectedDb || !selectedCollection) {
+                         setError("Select a database.");
+                         return;
+                       }
+                       fetchColumns(selectedDb, selectedCollection);
+                       setShowApiModal(true);
+                     }}
+                     className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/60 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-100"
+                   >
+                     + API
+                   </button>
+                 </div>
                  <div className={classNames("flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] shadow-sm", health ? healthStatusColor : "border-slate-700 text-slate-400")}>{health ? "Healthy" : "..."}</div>
               </div>
            </div>
