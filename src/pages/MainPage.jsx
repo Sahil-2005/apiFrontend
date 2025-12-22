@@ -1150,8 +1150,15 @@ export default function MainPage() {
   const [newCollectionName, setNewCollectionName] = useState("");
   const [newSchemaFieldInput, setNewSchemaFieldInput] = useState("");
   const [newSchemaFields, setNewSchemaFields] = useState([]);
+  const [newCollectionInput, setNewCollectionInput] = useState("");
+  const [newCollections, setNewCollections] = useState([]);
   const [creatingDb, setCreatingDb] = useState(false);
   const [error, setError] = useState(null);
+  
+  // Field editor state
+  const [editingFieldIndex, setEditingFieldIndex] = useState(null);
+  const [fieldValidators, setFieldValidators] = useState({});
+  const [editingCollectionIndex, setEditingCollectionIndex] = useState(null);
 
   // Match-field selection in create modal (for criteria)
   const [modalMatchField, setModalMatchField] = useState("_id");
@@ -1202,30 +1209,206 @@ export default function MainPage() {
   const handleAddSchemaField = () => {
     const trimmed = (newSchemaFieldInput || "").trim();
     if (!trimmed) return;
-    if (!newSchemaFields.includes(trimmed)) {
-      setNewSchemaFields((prev) => [...prev, trimmed]);
-    }
+    
+    // Check if field already exists
+    const fieldExists = newSchemaFields.some(f => 
+      (typeof f === "string" ? f : f.name) === trimmed
+    );
+    if (fieldExists) return;
+
+    // Create field object with empty validators
+    const newField = {
+      name: trimmed,
+      type: "string",
+      validators: {}
+    };
+    
+    setNewSchemaFields((prev) => [...prev, newField]);
     setNewSchemaFieldInput("");
   };
 
-  const handleRemoveSchemaField = (field) => {
-    setNewSchemaFields((prev) => prev.filter((f) => f !== field));
+  // ---------- Collections (multiple) ----------
+  const handleAddCollection = () => {
+    const trimmed = (newCollectionInput || "").trim();
+    if (!trimmed) return;
+    if (!newCollections.some((c) => c.name === trimmed)) {
+      setNewCollections((prev) => [...prev, { name: trimmed, schemaFields: [], newFieldInput: "" }]);
+    }
+    setNewCollectionInput("");
+  };
+
+  const handleRemoveCollection = (index) => {
+    setNewCollections((prev) => prev.filter((_, i) => i !== index));
+    if (editingCollectionIndex === index) {
+      setEditingCollectionIndex(null);
+      setEditingFieldIndex(null);
+    }
+  };
+
+  const handleCollectionFieldInputChange = (collectionIndex, value) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      copy[collectionIndex] = { ...copy[collectionIndex], newFieldInput: value };
+      return copy;
+    });
+  };
+
+  const handleAddFieldToCollection = (collectionIndex) => {
+    const coll = newCollections[collectionIndex];
+    if (!coll) return;
+    const trimmed = (coll.newFieldInput || "").trim();
+    if (!trimmed) return;
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      target.schemaFields = [...(target.schemaFields || []), { name: trimmed, type: 'string', validators: {} }];
+      target.newFieldInput = "";
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  const handleRemoveFieldFromCollection = (collectionIndex, fieldIndex) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      target.schemaFields = (target.schemaFields || []).filter((_, i) => i !== fieldIndex);
+      copy[collectionIndex] = target;
+      return copy;
+    });
+    if (editingFieldIndex === fieldIndex && editingCollectionIndex === collectionIndex) {
+      setEditingFieldIndex(null);
+    }
+  };
+
+  const handleCollectionFieldValidatorChange = (collectionIndex, fieldIndex, validatorKey, value) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      const fields = (target.schemaFields || []).map((f) => ({ ...f }));
+      const field = fields[fieldIndex] || { name: '', type: 'string', validators: {} };
+      field.validators = field.validators || {};
+      if (value === "" || value === null || value === undefined) {
+        delete field.validators[validatorKey];
+      } else {
+        field.validators[validatorKey] = value;
+      }
+      fields[fieldIndex] = field;
+      target.schemaFields = fields;
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  const handleCollectionFieldTypeChange = (collectionIndex, fieldIndex, newType) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      const fields = (target.schemaFields || []).map((f) => ({ ...f }));
+      if (!fields[fieldIndex]) return prev;
+      fields[fieldIndex].type = newType;
+      target.schemaFields = fields;
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  const openCreateCollectionModal = () => {
+    // Open modal prefilled with selected DB
+    if (!selectedDb) {
+      setError("Select a database first.");
+      return;
+    }
+    setNewDbName(selectedDb);
+    setNewCollectionName("");
+    setNewCollections([]);
+    setNewSchemaFields([]);
+    setShowCreateDbModal(true);
+  };
+
+  const openUpdateCollectionModal = async () => {
+    if (!selectedDb || !selectedCollection) {
+      setError("Select a database and collection to update.");
+      return;
+    }
+    setNewDbName(selectedDb);
+    setNewCollectionName(selectedCollection);
+    setNewCollections([]);
+    setShowCreateDbModal(true);
+
+    // Fetch columns for the selected collection and pre-fill schema fields into the collection object
+    try {
+      const res = await debugFetch(`${API_BASE_URL}/api/introspect/columns?dbName=${encodeURIComponent(selectedDb)}&collectionName=${encodeURIComponent(selectedCollection)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const cols = data.columns || [];
+        // Prefill into newCollections as single collection to be edited
+        setNewCollections([{ name: selectedCollection, schemaFields: cols.map((c) => ({ name: c, type: 'string', validators: {} })), newFieldInput: '' }]);
+        setNewSchemaFields([]);
+        setEditingCollectionIndex(0);
+      }
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  const handleRemoveSchemaField = (index) => {
+    setNewSchemaFields((prev) => prev.filter((_, i) => i !== index));
+    if (editingFieldIndex === index) {
+      setEditingFieldIndex(null);
+    }
+  };
+
+  const handleEditField = (index) => {
+    setEditingFieldIndex(editingFieldIndex === index ? null : index);
+  };
+
+  const handleFieldValidatorChange = (index, validatorKey, value) => {
+    setNewSchemaFields((prev) => {
+      const updated = [...prev];
+      const field = updated[index];
+      if (field.validators === undefined) field.validators = {};
+      
+      if (value === "" || value === null || value === undefined) {
+        delete field.validators[validatorKey];
+      } else {
+        field.validators[validatorKey] = value;
+      }
+      return updated;
+    });
+  };
+
+  const handleFieldTypeChange = (index, newType) => {
+    setNewSchemaFields((prev) => {
+      const updated = [...prev];
+      updated[index].type = newType;
+      return updated;
+    });
   };
 
   const handleCreateDbAndCollection = async () => {
-    if (!newDbName || !newCollectionName) {
-      setError("Database name and collection name are required.");
+    if (!newDbName || (!newCollectionName && (!newCollections || newCollections.length === 0))) {
+      setError("Database name and at least one collection name are required.");
       return;
     }
     try {
       setCreatingDb(true);
       setError(null);
 
-      const body = {
-        dbName: newDbName,
-        collectionName: newCollectionName,
-        schemaFields: newSchemaFields,
-      };
+      // If multiple collections were added, send them as `collections` array
+      let body;
+      if (Array.isArray(newCollections) && newCollections.length > 0) {
+        body = {
+          dbName: newDbName,
+          collections: newCollections.map((col) => ({ collectionName: col.name, schemaFields: col.schemaFields || [] }))
+        };
+      } else {
+        body = {
+          dbName: newDbName,
+          collectionName: newCollectionName,
+          schemaFields: newSchemaFields,
+        };
+      }
 
       const res = await debugFetch(`${API_BASE_URL}/api/introspect/create-db`, {
         method: "POST",
@@ -1251,6 +1434,9 @@ export default function MainPage() {
       setNewCollectionName("");
       setNewSchemaFieldInput("");
       setNewSchemaFields([]);
+      setNewCollections([]);
+      setNewCollectionInput("");
+      setEditingFieldIndex(null);
     } catch (err) {
       console.error("[create-db] error", err);
       setError(err.message || String(err));
@@ -1721,17 +1907,20 @@ export default function MainPage() {
       {/* Create DB / Collection Modal */}
       {showCreateDbModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div className="w-full max-w-2xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 bg-slate-900">
               <h3 className="text-sm font-semibold text-slate-200">Create Database & Collection</h3>
               <button
-                onClick={() => setShowCreateDbModal(false)}
+                onClick={() => {
+                  setShowCreateDbModal(false);
+                  setEditingFieldIndex(null);
+                }}
                 className="rounded hover:bg-slate-800 p-1 text-slate-400 hover:text-white transition"
               >
                 ✕
               </button>
             </div>
-            <div className="p-4 space-y-4 overflow-auto">
+            <div className="p-4 space-y-4 overflow-auto max-h-[calc(90vh-120px)]">
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1">Database Name</label>
                 <input
@@ -1741,6 +1930,33 @@ export default function MainPage() {
                   placeholder="e.g. analytics_db"
                   className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
                 />
+              </div>
+              {/* Multiple collections input */}
+              <div>
+                <label className="text-[11px] text-slate-400 block mb-1">Collections (optional)</label>
+                <div className="flex gap-2 mb-3">
+                  <input
+                    type="text"
+                    value={newCollectionInput}
+                    onChange={(e) => setNewCollectionInput(e.target.value)}
+                    placeholder="collectionName"
+                    className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddCollection();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCollection}
+                    className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500"
+                  >
+                    Add
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">Add multiple collections to create in this DB. Edit each collection below to configure its fields. If left empty, the single collection name below will be used.</p>
               </div>
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1">Collection Name</label>
@@ -1754,7 +1970,7 @@ export default function MainPage() {
               </div>
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1">Schema Fields (optional)</label>
-                <div className="flex gap-2">
+                <div className="flex gap-2 mb-3">
                   <input
                     type="text"
                     value={newSchemaFieldInput}
@@ -1776,33 +1992,215 @@ export default function MainPage() {
                     Add
                   </button>
                 </div>
-                {newSchemaFields.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {newSchemaFields.map((field) => (
-                      <span
-                        key={field}
-                        className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-slate-100 border border-slate-700"
-                      >
-                        {field}
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveSchemaField(field)}
-                          className="text-slate-400 hover:text-red-300"
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
+                {newCollections && newCollections.length > 0 ? (
+                  <div className="space-y-3">
+                    {newCollections.map((col, ci) => {
+                      const isCollEditing = editingCollectionIndex === ci;
+                      return (
+                        <div key={col.name + ci} className="border border-slate-700 rounded-lg bg-slate-950 overflow-hidden">
+                          <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 transition">
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              <span className="text-[11px] font-semibold text-sky-300">{col.name}</span>
+                              <span className="text-[10px] text-slate-500">({(col.schemaFields || []).length} fields)</span>
+                            </div>
+                            <div className="flex gap-1">
+                              <button type="button" onClick={() => setEditingCollectionIndex(isCollEditing ? null : ci)} className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 transition">{isCollEditing ? 'Hide Fields' : 'Edit Fields'}</button>
+                              <button type="button" onClick={() => handleRemoveCollection(ci)} className="text-[10px] text-red-300 hover:text-red-200 px-2 py-1">✕</button>
+                            </div>
+                          </div>
+
+                          {isCollEditing && (
+                            <div className="px-3 py-3 bg-slate-950 space-y-2 border-t border-slate-700">
+                              <div className="flex gap-2">
+                                <input type="text" value={col.newFieldInput || ''} onChange={(e) => handleCollectionFieldInputChange(ci, e.target.value)} placeholder="fieldName" className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddFieldToCollection(ci); } }} />
+                                <button type="button" onClick={() => handleAddFieldToCollection(ci)} className="rounded-lg bg-sky-600 px-3 py-1 text-xs font-semibold text-white hover:bg-sky-500">Add</button>
+                              </div>
+
+                              {/* Collection fields */}
+                              {(col.schemaFields || []).length > 0 && (
+                                <div className="space-y-2">
+                                  {col.schemaFields.map((field, fi) => {
+                                    const fieldName = field.name;
+                                    const fieldType = field.type || 'string';
+                                    const validators = field.validators || {};
+                                    const isEditingField = editingCollectionIndex === ci && editingFieldIndex === fi;
+                                    return (
+                                      <div key={fieldName + fi} className="border border-slate-700 rounded-lg bg-slate-950 overflow-hidden">
+                                        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 transition">
+                                          <div className="flex items-center gap-2 flex-1 min-w-0">
+                                            <span className="text-[10px] font-semibold text-sky-300">{fieldName}</span>
+                                            <span className="text-[10px] text-slate-500">({fieldType})</span>
+                                          </div>
+                                          <div className="flex gap-1">
+                                            <button type="button" onClick={() => { setEditingCollectionIndex(ci); setEditingFieldIndex(isEditingField ? null : fi); }} className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 transition">{isEditingField ? 'Hide' : 'Edit'}</button>
+                                            <button type="button" onClick={() => handleRemoveFieldFromCollection(ci, fi)} className="text-[10px] text-red-300 hover:text-red-200 px-2 py-1">✕</button>
+                                          </div>
+                                        </div>
+
+                                        {isEditingField && (
+                                          <div className="px-3 py-3 bg-slate-950 space-y-2 border-t border-slate-700">
+                                            <div>
+                                              <label className="text-[10px] text-slate-400 block mb-1">Type</label>
+                                              <select value={fieldType} onChange={(e) => handleCollectionFieldTypeChange(ci, fi, e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-500">
+                                                <option value="string">String</option>
+                                                <option value="number">Number</option>
+                                                <option value="object">Object</option>
+                                                <option value="array">Array</option>
+                                                <option value="bool">Boolean</option>
+                                                <option value="date">Date</option>
+                                              </select>
+                                            </div>
+
+                                            {(fieldType === 'string' || fieldType === undefined) && (
+                                              <>
+                                                <div>
+                                                  <label className="text-[10px] text-slate-400 block mb-1">Min Length</label>
+                                                  <input type="number" min="0" value={validators.minLength || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'minLength', e.target.value ? parseInt(e.target.value) : '')} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                                </div>
+                                                <div>
+                                                  <label className="text-[10px] text-slate-400 block mb-1">Max Length</label>
+                                                  <input type="number" min="0" value={validators.maxLength || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'maxLength', e.target.value ? parseInt(e.target.value) : '')} placeholder="255" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                                </div>
+                                                <div>
+                                                  <label className="text-[10px] text-slate-400 block mb-1">Pattern (Regex)</label>
+                                                  <input type="text" value={validators.pattern || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'pattern', e.target.value)} placeholder="^[a-zA-Z0-9]+$" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500 font-mono text-[10px]" />
+                                                </div>
+                                              </>
+                                            )}
+
+                                            {fieldType === 'number' && (
+                                              <>
+                                                <div>
+                                                  <label className="text-[10px] text-slate-400 block mb-1">Minimum</label>
+                                                  <input type="number" value={validators.minimum || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'minimum', e.target.value ? parseInt(e.target.value) : '')} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                                </div>
+                                                <div>
+                                                  <label className="text-[10px] text-slate-400 block mb-1">Maximum</label>
+                                                  <input type="number" value={validators.maximum || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'maximum', e.target.value ? parseInt(e.target.value) : '')} placeholder="100" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                                </div>
+                                              </>
+                                            )}
+
+                                            <div>
+                                              <label className="text-[10px] text-slate-400 block mb-1">Enum (comma-separated)</label>
+                                              <input type="text" value={Array.isArray(validators.enum) ? validators.enum.join(', ') : ''} onChange={(e) => { const values = e.target.value.split(',').map(v => v.trim()).filter(v => v); handleCollectionFieldValidatorChange(ci, fi, 'enum', values.length > 0 ? values : ''); }} placeholder="active, inactive" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                            </div>
+
+                                            <div>
+                                              <label className="text-[10px] text-slate-400 block mb-1">Default Value</label>
+                                              <input type="text" value={validators.default || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'default', e.target.value)} placeholder="default value" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                            </div>
+
+                                            <div>
+                                              <label className="text-[10px] text-slate-400 block mb-1">Description</label>
+                                              <input type="text" value={validators.description || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'description', e.target.value)} placeholder="field description" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
+                ) : (
+                  newSchemaFields.length > 0 && (
+                    <div className="space-y-2">
+                      {newSchemaFields.map((field, index) => {
+                        const fieldName = typeof field === "string" ? field : field.name;
+                        const fieldType = typeof field === "object" ? field.type : "string";
+                        const validators = typeof field === "object" ? field.validators : {};
+                        const isEditing = editingFieldIndex === index;
+                        return (
+                          <div key={index} className="border border-slate-700 rounded-lg bg-slate-950 overflow-hidden">
+                            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 transition">
+                              <div className="flex items-center gap-2 flex-1 min-w-0">
+                                <span className="text-[10px] font-semibold text-sky-300">{fieldName}</span>
+                                <span className="text-[10px] text-slate-500">({fieldType})</span>
+                              </div>
+                              <div className="flex gap-1">
+                                <button type="button" onClick={() => handleEditField(index)} className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 transition">{isEditing ? 'Hide' : 'Edit'}</button>
+                                <button type="button" onClick={() => handleRemoveSchemaField(index)} className="text-[10px] text-red-300 hover:text-red-200 px-2 py-1">✕</button>
+                              </div>
+                            </div>
+                            {isEditing && (
+                              <div className="px-3 py-3 bg-slate-950 space-y-2 border-t border-slate-700">
+                                <div>
+                                  <label className="text-[10px] text-slate-400 block mb-1">Type</label>
+                                  <select value={fieldType} onChange={(e) => handleFieldTypeChange(index, e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-500">
+                                    <option value="string">String</option>
+                                    <option value="number">Number</option>
+                                    <option value="object">Object</option>
+                                    <option value="array">Array</option>
+                                    <option value="bool">Boolean</option>
+                                    <option value="date">Date</option>
+                                  </select>
+                                </div>
+                                {/* reuse existing validators UI */}
+                                {(fieldType === "string" || fieldType === undefined) && (
+                                  <>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Min Length</label>
+                                      <input type="number" min="0" value={validators.minLength || ""} onChange={(e) => handleFieldValidatorChange(index, "minLength", e.target.value ? parseInt(e.target.value) : "")} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Max Length</label>
+                                      <input type="number" min="0" value={validators.maxLength || ""} onChange={(e) => handleFieldValidatorChange(index, "maxLength", e.target.value ? parseInt(e.target.value) : "")} placeholder="255" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Pattern (Regex)</label>
+                                      <input type="text" value={validators.pattern || ""} onChange={(e) => handleFieldValidatorChange(index, "pattern", e.target.value)} placeholder="^[a-zA-Z0-9]+$" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500 font-mono text-[10px]" />
+                                    </div>
+                                  </>
+                                )}
+                                {fieldType === "number" && (
+                                  <>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Minimum</label>
+                                      <input type="number" value={validators.minimum || ""} onChange={(e) => handleFieldValidatorChange(index, "minimum", e.target.value ? parseInt(e.target.value) : "")} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Maximum</label>
+                                      <input type="number" value={validators.maximum || ""} onChange={(e) => handleFieldValidatorChange(index, "maximum", e.target.value ? parseInt(e.target.value) : "")} placeholder="100" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                  </>
+                                )}
+                                <div>
+                                  <label className="text-[10px] text-slate-400 block mb-1">Enum (comma-separated)</label>
+                                  <input type="text" value={Array.isArray(validators.enum) ? validators.enum.join(", ") : ""} onChange={(e) => { const values = e.target.value.split(",").map(v => v.trim()).filter(v => v); handleFieldValidatorChange(index, "enum", values.length > 0 ? values : ""); }} placeholder="active, inactive, pending" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] text-slate-400 block mb-1">Default Value</label>
+                                  <input type="text" value={validators.default || ""} onChange={(e) => handleFieldValidatorChange(index, "default", e.target.value)} placeholder="default value" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] text-slate-400 block mb-1">Description</label>
+                                  <input type="text" value={validators.description || ""} onChange={(e) => handleFieldValidatorChange(index, "description", e.target.value)} placeholder="field description" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )
                 )}
                 <p className="text-[10px] text-slate-500 mt-1">
-                  These fields describe what you want to keep in this collection; they are stored as metadata for the dashboard.
+                  Add fields and configure validators. Click "Edit" to set constraints like min/max length, patterns, defaults, etc.
                 </p>
               </div>
             </div>
             <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 flex justify-end gap-2">
               <button
-                onClick={() => setShowCreateDbModal(false)}
+                onClick={() => {
+                  setShowCreateDbModal(false);
+                  setEditingFieldIndex(null);
+                }}
                 className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800"
               >
                 Cancel
@@ -1837,11 +2235,27 @@ export default function MainPage() {
               <div className="flex flex-col items-end gap-2">
                  <div className="flex gap-2">
                    <button
-                     onClick={() => setShowCreateDbModal(true)}
+                     onClick={() => { setNewDbName(""); setNewCollectionName(""); setNewCollections([]); setNewSchemaFields([]); setShowCreateDbModal(true); }}
                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-500/20"
                    >
                      + Create DB
                    </button>
+                   {selectedDb && (
+                     <>
+                       <button
+                         onClick={openCreateCollectionModal}
+                         className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-400/6 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-400/12"
+                       >
+                         + Create Collection
+                       </button>
+                       <button
+                         onClick={openUpdateCollectionModal}
+                         className="inline-flex items-center gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-500/6 px-3 py-1.5 text-xs font-medium text-yellow-100 hover:bg-yellow-500/12"
+                       >
+                         Update Collection
+                       </button>
+                     </>
+                   )}
                    <button
                      onClick={() => {
                        if (!selectedDb || !selectedCollection) {
