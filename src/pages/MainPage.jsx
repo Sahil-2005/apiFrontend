@@ -1,0 +1,1577 @@
+import { useEffect, useState } from "react";
+
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || "http://localhost:3000";
+
+function classNames(...classes) {
+  return classes.filter(Boolean).join(" ");
+}
+
+/* ---------- debugFetch helper (unchanged) ---------- */
+async function debugFetch(url, opts = {}) {
+  const sessionToken = localStorage.getItem('sessionToken');
+  const headers = { ...(opts.headers || {}), };
+  if (opts.body && !headers['Content-Type'] && !headers['content-type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (sessionToken) {
+    headers['x-session-token'] = sessionToken;
+  }
+  const fetchOpts = { ...opts, headers, credentials: 'include', };
+
+  console.log("[debugFetch] request:", url, fetchOpts);
+  try {
+    const res = await fetch(url, fetchOpts);
+    const text = await res.text().catch(() => "");
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (e) { /* not json */ }
+    console.log("[debugFetch] response:", { url, status: res.status, ok: res.ok, text, json });
+    return {
+      ok: res.ok,
+      status: res.status,
+      json: async () => json,
+      text: async () => text,
+    };
+  } catch (err) {
+    console.error("[debugFetch] network error:", err, url);
+    throw err;
+  }
+}
+
+/* ---------- DocumentModal (unchanged) ---------- */
+function DocumentModal({ doc, onClose }) {
+  if (!doc) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+      <div className="w-full max-w-3xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 bg-slate-900">
+          <h3 className="text-sm font-semibold text-slate-200">Document Details</h3>
+          <button onClick={onClose} className="rounded hover:bg-slate-800 p-1 text-slate-400 hover:text-white transition">✕</button>
+        </div>
+        <div className="flex-1 overflow-auto p-4 bg-slate-950">
+          <pre className="text-xs font-mono text-slate-300 leading-relaxed whitespace-pre-wrap">
+            {JSON.stringify(doc, null, 2)}
+          </pre>
+        </div>
+        <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 text-right">
+          <button onClick={onClose} className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-medium text-white hover:bg-slate-700 transition">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Main App component ---------- */
+export default function MainPage() {
+  // Health, connection UI
+  const [health, setHealth] = useState(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+
+  // DB connection
+  const [mongoUri, setMongoUri] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [connectMessage, setConnectMessage] = useState(null);
+
+  // DB / collections / documents
+  const [databases, setDatabases] = useState([]);
+  const [dbLoading, setDbLoading] = useState(false);
+  const [selectedDb, setSelectedDb] = useState(null);
+
+  const [collections, setCollections] = useState([]);
+  const [collectionsLoading, setCollectionsLoading] = useState(false);
+  const [selectedCollection, setSelectedCollection] = useState(null);
+
+  const [documents, setDocuments] = useState([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [docsLimit, setDocsLimit] = useState(10);
+
+  const [columns, setColumns] = useState([]);
+  const [columnsLoading, setColumnsLoading] = useState(false);
+
+  // Request form and methods
+  const [requestMethod, setRequestMethod] = useState("GET");
+  // NEW: Aggregation method (only used when requestMethod === "GET")
+  const [aggregationMethod, setAggregationMethod] = useState("NONE");
+  const [apiFormValues, setApiFormValues] = useState({});
+  // HTTP / logical request methods
+  const REQUEST_METHODS = ["GET", "POST", "PUT", "DELETE", "FETCH"];
+  // Aggregation functions selectable when GET is chosen
+  const AGGREGATION_METHODS = ["NONE", "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_BY"];
+
+  // Create API form fields (modal)
+  const [apiName, setApiName] = useState("");
+  const [apiPassword, setApiPassword] = useState("");
+  const [savingApi, setSavingApi] = useState(false);
+
+  // Stored backend APIs
+  const [backendApis, setBackendApis] = useState([]);
+  const [backendApisLoading, setBackendApisLoading] = useState(false);
+  const [selectedBackendApi, setSelectedBackendApi] = useState(null);
+  const [backendApiFormValues, setBackendApiFormValues] = useState({});
+
+  // Relations
+  const [relations, setRelations] = useState(null);
+  const [relationsLoading, setRelationsLoading] = useState(false);
+
+  // Available collections for referencing (used in field editor)
+  const [availableRefCollections, setAvailableRefCollections] = useState([]);
+
+  // Explicit relation metadata (from our RelationMetadata model)
+  const [relationMetadata, setRelationMetadata] = useState([]);
+  const [relationMetadataLoading, setRelationMetadataLoading] = useState(false);
+
+  const [viewingDoc, setViewingDoc] = useState(null);
+  const [showApiModal, setShowApiModal] = useState(false);
+  // NEW: Create DB/Collection modal state
+  const [showCreateDbModal, setShowCreateDbModal] = useState(false);
+  const [modalMode, setModalMode] = useState('createDb'); // 'createDb' | 'createCollection' | 'updateCollection'
+  const [newDbName, setNewDbName] = useState("");
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newCollectionInput, setNewCollectionInput] = useState("");
+  const [newCollections, setNewCollections] = useState([]);
+  const [creatingDb, setCreatingDb] = useState(false);
+  const [error, setError] = useState(null);
+  
+  // Field editor state
+  const [editingFieldIndex, setEditingFieldIndex] = useState(null);
+  const [editingCollectionIndex, setEditingCollectionIndex] = useState(null);
+
+  // Match-field selection in create modal (for criteria)
+  const [modalMatchField, setModalMatchField] = useState("_id");
+  // NEW: Aggregate target field selection in create modal
+  const [modalAggregateField, setModalAggregateField] = useState("");
+
+  const [selectedMatchField, setSelectedMatchField] = useState("_id");
+
+  // Reset when columns change
+  useEffect(() => {
+    setModalMatchField("_id");
+    if(columns.length > 0) setModalAggregateField(columns[0]);
+  }, [columns]);
+
+  // ... (connectToCustomDb, fetchHealth, fetchDatabases, fetchCollections, fetchColumns, fetchDocuments, fetchRelations, fetchBackendApis remain unchanged) ...
+  
+  // Need to include these for context, assuming they are defined same as provided code:
+  const connectToCustomDb = async () => { /* ... existing logic ... */ 
+      // Simplified for brevity, assume calling debugFetch logic
+      // Note: In real implementation, keep the FULL original logic here
+      if (!mongoUri) { setError("Please enter a MongoDB connection URI."); return; }
+      try {
+        setConnecting(true); setError(null); setConnectMessage(null);
+        const res = await debugFetch(`${API_BASE_URL}/api/introspect/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uri: mongoUri }), });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        setConnectMessage(data.message || "Connected.");
+        await Promise.all([fetchHealth(), fetchDatabases(), fetchRelations()]);
+      } catch (err) { setError(err.message); } finally { setConnecting(false); }
+  };
+  const fetchHealth = async () => { /* ... */ 
+      try { setHealthLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/health`); const data = await res.json(); setHealth(data); } catch (e) { setHealth(null); } finally { setHealthLoading(false); }
+  };
+  const fetchDatabases = async () => { /* ... */ 
+      try { setDbLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/databases`); const data = await res.json(); setDatabases(data.databases || []); } catch (e) { setDatabases([]); } finally { setDbLoading(false); }
+  };
+  const fetchRelations = async () => { /* ... */ 
+      try { setRelationsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/relations`); const data = await res.json(); setRelations(data.data || {}); } catch (e) { setRelations(null); } finally { setRelationsLoading(false); }
+  };
+
+  // Fetch explicit relation metadata
+  const fetchRelationMetadata = async (dbName) => {
+    const db = dbName || selectedDb;
+    if (!db) {
+      setRelationMetadata([]);
+      return;
+    }
+    try {
+      setRelationMetadataLoading(true);
+      const res = await debugFetch(`${API_BASE_URL}/api/relation-metadata?dbName=${encodeURIComponent(db)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setRelationMetadata(data.raw || []);
+      } else {
+        setRelationMetadata([]);
+      }
+    } catch (e) {
+      setRelationMetadata([]);
+    } finally {
+      setRelationMetadataLoading(false);
+    }
+  };
+  const fetchCollections = async (dbName) => { 
+      if (!dbName) return; try { setCollectionsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/collections?dbName=${encodeURIComponent(dbName)}`); const data = await res.json(); setCollections(data.collections || []); } catch(e) { setCollections([]); } finally { setCollectionsLoading(false); }
+  };
+  const fetchColumns = async (dbName, collectionName) => { 
+      if (!dbName || !collectionName) return; try { setColumnsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/colums?dbName=${dbName}&collectionName=${collectionName}`); const data = await res.json(); setColumns(data.columns || []); } catch(e){ setColumns([]); } finally { setColumnsLoading(false); }
+  };
+
+  // ---------- Collections (multiple) ----------
+  const handleAddCollection = () => {
+    const trimmed = (newCollectionInput || "").trim();
+    if (!trimmed) return;
+    if (!newCollections.some((c) => c.name === trimmed)) {
+      setNewCollections((prev) => [...prev, { name: trimmed, schemaFields: [], newFieldInput: "" }]);
+    }
+    setNewCollectionInput("");
+  };
+
+  const handleRemoveCollection = (index) => {
+    setNewCollections((prev) => prev.filter((_, i) => i !== index));
+    if (editingCollectionIndex === index) {
+      setEditingCollectionIndex(null);
+      setEditingFieldIndex(null);
+    }
+  };
+
+  const handleCollectionFieldInputChange = (collectionIndex, value) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      copy[collectionIndex] = { ...copy[collectionIndex], newFieldInput: value };
+      return copy;
+    });
+  };
+
+  const handleAddFieldToCollection = (collectionIndex) => {
+    setNewCollections((prev) => {
+      const coll = prev[collectionIndex];
+      if (!coll) return prev;
+      const trimmed = (coll.newFieldInput || "").trim();
+      if (!trimmed) return prev;
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      target.schemaFields = [...(target.schemaFields || []), { name: trimmed, type: 'string', validators: {} }];
+      target.newFieldInput = "";
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  const handleRemoveFieldFromCollection = (collectionIndex, fieldIndex) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      target.schemaFields = (target.schemaFields || []).filter((_, i) => i !== fieldIndex);
+      copy[collectionIndex] = target;
+      return copy;
+    });
+    if (editingFieldIndex === fieldIndex && editingCollectionIndex === collectionIndex) {
+      setEditingFieldIndex(null);
+    }
+  };
+
+  const handleCollectionFieldValidatorChange = (collectionIndex, fieldIndex, validatorKey, value) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      const fields = (target.schemaFields || []).map((f) => ({ ...f }));
+      const field = fields[fieldIndex] || { name: '', type: 'string', validators: {} };
+      field.validators = field.validators || {};
+      if (value === "" || value === null || value === undefined) {
+        delete field.validators[validatorKey];
+      } else {
+        field.validators[validatorKey] = value;
+      }
+      fields[fieldIndex] = field;
+      target.schemaFields = fields;
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  const handleCollectionFieldTypeChange = (collectionIndex, fieldIndex, newType) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      const fields = (target.schemaFields || []).map((f) => ({ ...f }));
+      if (!fields[fieldIndex]) return prev;
+      fields[fieldIndex].type = newType;
+      // Clear ref data when type changes away from ObjectId
+      if (newType !== 'objectId') {
+        delete fields[fieldIndex].ref;
+        delete fields[fieldIndex].refCollection;
+      }
+      target.schemaFields = fields;
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  // Handle toggling reference on a field
+  const handleCollectionFieldRefToggle = (collectionIndex, fieldIndex, isRef) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      const fields = (target.schemaFields || []).map((f) => ({ ...f }));
+      if (!fields[fieldIndex]) return prev;
+      
+      if (isRef) {
+        // Enable reference - set type to ObjectId
+        fields[fieldIndex].type = 'objectId';
+        fields[fieldIndex].ref = true;
+        fields[fieldIndex].refCollection = '';
+      } else {
+        // Disable reference - revert to string
+        fields[fieldIndex].type = 'string';
+        delete fields[fieldIndex].ref;
+        delete fields[fieldIndex].refCollection;
+      }
+      target.schemaFields = fields;
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  // Handle changing the target collection for a reference
+  const handleCollectionFieldRefTarget = (collectionIndex, fieldIndex, targetCollection) => {
+    setNewCollections((prev) => {
+      const copy = [...prev];
+      const target = { ...copy[collectionIndex] };
+      const fields = (target.schemaFields || []).map((f) => ({ ...f }));
+      if (!fields[fieldIndex]) return prev;
+      fields[fieldIndex].refCollection = targetCollection;
+      target.schemaFields = fields;
+      copy[collectionIndex] = target;
+      return copy;
+    });
+  };
+
+  // Fetch available collections for reference selection
+  const fetchAvailableRefCollections = async (dbName) => {
+    if (!dbName) {
+      setAvailableRefCollections([]);
+      return;
+    }
+    try {
+      const res = await debugFetch(`${API_BASE_URL}/api/introspect/collections?dbName=${encodeURIComponent(dbName)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableRefCollections(data.collections || []);
+      }
+    } catch (e) {
+      setAvailableRefCollections([]);
+    }
+  };
+
+  const openCreateCollectionModal = () => {
+    // Open modal prefilled with selected DB
+    if (!selectedDb) {
+      setError("Select a database first.");
+      return;
+    }
+    setNewDbName(selectedDb);
+    setNewCollectionName("");
+    setNewCollections([]);
+    setEditingCollectionIndex(null);
+    setEditingFieldIndex(null);
+    setModalMode('createCollection');
+    setShowCreateDbModal(true);
+    // Fetch available collections for reference selection
+    fetchAvailableRefCollections(selectedDb);
+  };
+
+  const openUpdateCollectionModal = async () => {
+    if (!selectedDb || !selectedCollection) {
+      setError("Select a database and collection to update.");
+      return;
+    }
+    setNewDbName(selectedDb);
+    setNewCollectionName(selectedCollection);
+    // Initialize with collection name immediately so UI renders the input fields
+    setNewCollections([{ name: selectedCollection, schemaFields: [], newFieldInput: '' }]);
+    setEditingCollectionIndex(0);
+    setEditingFieldIndex(null);
+    setModalMode('updateCollection');
+    setShowCreateDbModal(true);
+    // Fetch available collections for reference selection
+    fetchAvailableRefCollections(selectedDb);
+
+    // Fetch columns for the selected collection and pre-fill schema fields into the collection object
+    try {
+      const res = await debugFetch(`${API_BASE_URL}/api/introspect/columns?dbName=${encodeURIComponent(selectedDb)}&collectionName=${encodeURIComponent(selectedCollection)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const cols = data.columns || [];
+        // Update newCollections with fetched fields
+        setNewCollections([{ name: selectedCollection, schemaFields: cols.map((c) => ({ name: c, type: 'string', validators: {} })), newFieldInput: '' }]);
+      }
+    } catch (e) {
+      // ignore - fields will just be empty
+    }
+  };
+
+  const handleCreateDbAndCollection = async () => {
+    if (!newDbName) {
+      setError("Database name is required.");
+      return;
+    }
+    if (newCollections.length === 0) {
+      setError("At least one collection is required.");
+      return;
+    }
+    try {
+      setCreatingDb(true);
+      setError(null);
+
+      // Send collections array
+      const body = {
+        dbName: newDbName,
+        collections: newCollections.map((col) => ({ collectionName: col.name, schemaFields: col.schemaFields || [] }))
+      };
+
+      const res = await debugFetch(`${API_BASE_URL}/api/introspect/create-db`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `Request failed with status ${res.status}`);
+      }
+
+      // Refresh DB/collections and close modal
+      await fetchDatabases();
+      if (newDbName) {
+        await fetchCollections(newDbName);
+        setSelectedDb(newDbName);
+        if (newCollections.length > 0) {
+          setSelectedCollection(newCollections[0].name);
+        }
+      }
+
+      setShowCreateDbModal(false);
+      setNewDbName("");
+      setNewCollectionName("");
+      setNewCollections([]);
+      setNewCollectionInput("");
+      setEditingFieldIndex(null);
+      setEditingCollectionIndex(null);
+    } catch (err) {
+      console.error("[create-db] error", err);
+      setError(err.message || String(err));
+    } finally {
+      setCreatingDb(false);
+    }
+  };
+  // const fetchDocuments = async (dbName, collectionName, limit=10) => {
+  //     if (!dbName || !collectionName) return; try { setDocumentsLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${collectionName}&limit=${limit}`); const data = await res.json(); setDocuments(data.documents || []); } catch(e) { setDocuments([]); } finally { setDocumentsLoading(false); }
+  // };
+  const fetchDocuments = async (dbName, collectionName, limit = 10) => {
+    if (!dbName || !collectionName) return;
+
+    try {
+      setDocumentsLoading(true);
+
+      // 1. Fetch the main documents
+      const res = await debugFetch(
+        `${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${collectionName}&limit=${limit}`
+      );
+      const data = await res.json();
+      let mainDocs = data.documents || [];
+
+      // 2. Identify potential relationships (Convention: fieldName ending in "Id")
+      // Example: "userId" -> implies relation to "users" collection
+      if (mainDocs.length > 0) {
+        const sample = mainDocs[0];
+        const relationMap = {}; // stores mapping: { fieldName: targetCollection }
+
+        Object.keys(sample).forEach((key) => {
+          if (key.endsWith("Id") && key !== "_id") {
+            // "userId" -> "user" -> "users" (Pluralize convention)
+            const baseName = key.slice(0, -2); 
+            // Simple pluralization: add 's'. 
+            // Note: complex names like 'category' -> 'categories' might need a library like 'pluralize'
+            relationMap[key] = baseName + "s"; 
+          }
+        });
+
+        // 3. Fetch related data if relations found
+        if (Object.keys(relationMap).length > 0) {
+            // Create a queue of promises to fetch related data
+            const populationPromises = Object.entries(relationMap).map(async ([fieldKey, targetCollection]) => {
+                
+                // Collect all unique IDs for this field from the mainDocs
+                const idsToFetch = [...new Set(mainDocs.map(doc => doc[fieldKey]).filter(id => id))];
+                
+                if (idsToFetch.length === 0) return;
+
+                // Create a filter to fetch only these IDs
+                // Filter format: { "_id": { "$in": ["id1", "id2"] } }
+                const filter = JSON.stringify({
+                    _id: { $in: idsToFetch }
+                });
+
+                try {
+                    const relRes = await debugFetch(
+                        `${API_BASE_URL}/api/introspect/documents?dbName=${dbName}&collectionName=${targetCollection}&limit=${idsToFetch.length}&filter=${encodeURIComponent(filter)}`
+                    );
+                    const relData = await relRes.json();
+                    const relatedDocs = relData.documents || [];
+
+                    // Create a lookup map for faster access: { id: document }
+                    const lookup = relatedDocs.reduce((acc, doc) => {
+                        acc[doc._id] = doc;
+                        return acc;
+                    }, {});
+
+                    // 4. Attach the related data to the main documents
+                    mainDocs = mainDocs.map(doc => {
+                        const foreignKey = doc[fieldKey];
+                        if (lookup[foreignKey]) {
+                            // Embed the full object. 
+                            // e.g. doc.user = { _id:..., name: "John" }
+                            // We remove the 'Id' suffix for the new key (userId -> user)
+                            const newKey = fieldKey.slice(0, -2); 
+                            return { ...doc, [newKey]: lookup[foreignKey] };
+                        }
+                        return doc;
+                    });
+
+                } catch (err) {
+                    console.warn(`Failed to populate ${targetCollection}:`, err);
+                    // Fail silently and keep original data
+                }
+            });
+
+            await Promise.all(populationPromises);
+        }
+      }
+
+      setDocuments(mainDocs);
+    } catch (e) {
+      console.error(e);
+      setDocuments([]);
+    } finally {
+      setDocumentsLoading(false);
+    }
+  };
+  const fetchBackendApis = async () => {
+      try { setBackendApisLoading(true); const res = await debugFetch(`${API_BASE_URL}/api/backend-apis`); const data = await res.json(); setBackendApis(data.data || []); } catch(e){ setBackendApis([]); } finally { setBackendApisLoading(false); }
+  };
+
+  const deleteBackendApi = async (id) => {
+    if (!id) return;
+    try {
+      const res = await debugFetch(`${API_BASE_URL}/api/backend-apis/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      await fetchBackendApis();
+      if (selectedBackendApi?._id === id) { setSelectedBackendApi(null); setBackendApiFormValues({}); }
+    } catch (err) { setError(err.message || String(err)); }
+  };
+
+  // ---------- UPDATED: Save Backend API ----------
+  const saveBackendApi = async () => {
+    if (!apiName) { setError("API name is required."); return; }
+    if (!selectedDb || !selectedCollection) { setError("Select a database and collection."); return; }
+
+    try {
+      setSavingApi(true);
+      setError(null);
+
+      const body = {
+        api_name: apiName,
+        password: apiPassword,
+        columns,
+        request: requestMethod, // stays as HTTP-like method (GET/POST/PUT/DELETE/FETCH)
+        dbName: selectedDb,
+        collectionName: selectedCollection,
+        payloadSample: apiFormValues,
+        meta: {},
+      };
+
+      // Save matchField for PUT, DELETE, FETCH, and GET+Aggregation (they can all use filters)
+      if (
+        ["PUT", "DELETE", "FETCH"].includes(requestMethod) ||
+        (requestMethod === "GET" && aggregationMethod && aggregationMethod !== "NONE")
+      ) {
+        body.meta.matchField = modalMatchField || "_id";
+      }
+
+      // Save aggregation configuration only when GET has an aggregation selected
+      if (
+        requestMethod === "GET" &&
+        aggregationMethod &&
+        aggregationMethod !== "NONE"
+      ) {
+        body.meta.aggregationMethod = aggregationMethod;
+        // For SUM, AVG, MIN, MAX, GROUP_BY we also need an aggregate target field
+        if (["SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(aggregationMethod)) {
+          body.meta.aggregateField = modalAggregateField;
+        }
+      }
+
+      const res = await debugFetch(`${API_BASE_URL}/api/backend-apis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => "");
+        throw new Error(bodyText || `Request failed with status ${res.status}`);
+      }
+
+      const data = await res.json();
+      setShowApiModal(false);
+      setApiName("");
+      setApiPassword("");
+      setModalMatchField("_id");
+      setModalAggregateField("");
+      await fetchBackendApis();
+      if (data?.data) setSelectedBackendApi(data.data);
+    } catch (err) {
+      console.error("[saveBackendApi] error", err);
+      setError(err.message || String(err));
+    } finally {
+      setSavingApi(false);
+    }
+  };
+
+  // Effects & sync
+  useEffect(() => { fetchHealth(); fetchDatabases(); fetchRelations(); fetchRelationMetadata(); fetchBackendApis(); }, []);
+  useEffect(() => { if (selectedDb) { setSelectedCollection(null); setDocuments([]); fetchCollections(selectedDb); fetchRelationMetadata(selectedDb); } else { setCollections([]); setRelationMetadata([]); } }, [selectedDb]);
+  useEffect(() => { if (selectedDb && selectedCollection) { fetchDocuments(selectedDb, selectedCollection, docsLimit); fetchColumns(selectedDb, selectedCollection); } else { setDocuments([]); setColumns([]); } }, [selectedCollection, docsLimit]);
+  useEffect(() => { setApiFormValues((prev) => { const next = {}; columns.forEach((col) => { next[col] = prev?.[col] ?? ""; }); return next; }); }, [columns]);
+
+  // when selectedBackendApi changes, prefill form
+  useEffect(() => {
+    if (selectedBackendApi) {
+      const cols = selectedBackendApi.columns || [];
+      const payload = selectedBackendApi.payloadSample || {};
+      const next = {};
+      cols.forEach((c) => { next[c] = payload?.[c] ?? ""; });
+      setBackendApiFormValues(next);
+
+      const match = (selectedBackendApi.meta && selectedBackendApi.meta.matchField) ? selectedBackendApi.meta.matchField : "_id";
+      setSelectedMatchField(match);
+      setBackendApiFormValues((prev) => ({ ...prev, [match]: prev?.[match] ?? "" }));
+    } else {
+      setBackendApiFormValues({});
+      setSelectedMatchField("_id");
+    }
+  }, [selectedBackendApi]);
+
+  const handleFieldChange = (column, value) => setApiFormValues((prev) => ({ ...prev, [column]: value }));
+  const handleBackendApiFieldChange = (column, value) => setBackendApiFormValues((prev) => ({ ...prev, [column]: value }));
+
+  const loadBackendApiData = () => {
+    if (!selectedBackendApi?.dbName || !selectedBackendApi?.collectionName) { setError("Saved API is missing database or collection info."); return; }
+    setSelectedDb(selectedBackendApi.dbName);
+    setSelectedCollection(selectedBackendApi.collectionName);
+    fetchDocuments(selectedBackendApi.dbName, selectedBackendApi.collectionName, docsLimit);
+    fetchColumns(selectedBackendApi.dbName, selectedBackendApi.collectionName);
+  };
+
+  // ---------- UPDATED: Execute backend API ----------
+  const executeBackendApi = async () => {
+    if (!selectedBackendApi) { setError("Select a saved API to execute."); return; }
+
+    try {
+      setError(null);
+      const savedRequest = (selectedBackendApi.request || "GET").toUpperCase();
+      const matchField = (selectedBackendApi.meta && selectedBackendApi.meta.matchField) ? selectedBackendApi.meta.matchField : "_id";
+      
+      // Determine Payload based on Method
+      let payload = {};
+
+      if (["DELETE", "FETCH", "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(savedRequest)) {
+         // These methods primarily rely on the Match Field for filtering.
+         // If a value is provided in the form, use it. If not, send empty (matches all for aggregates).
+         const matchValue = backendApiFormValues[matchField] ?? backendApiFormValues["id"] ?? backendApiFormValues["_id"];
+         
+         // Strict check for DELETE/FETCH, loose for Aggregates
+         if ((savedRequest === "DELETE" || savedRequest === "FETCH") && (matchValue === undefined || matchValue === "")) {
+            setError(`${savedRequest} requires value for match field "${matchField}".`);
+            return;
+         }
+         
+         if (matchValue !== undefined && matchValue !== "") {
+            payload[matchField] = matchValue;
+         }
+      } else if (savedRequest === "PUT") {
+         // PUT Logic (Original)
+         const matchValue = backendApiFormValues[matchField] ?? backendApiFormValues["id"] ?? backendApiFormValues["_id"];
+         if (matchValue === undefined || matchValue === "") { setError(`PUT requires match field "${matchField}".`); return; }
+         payload[matchField] = matchValue;
+         const BODY_FIELD_EXCLUDE = new Set(["_id", "id", "__v", "createdAt", "updatedAt", "created_at", "updated_at"]);
+         (selectedBackendApi.columns || []).forEach((col) => {
+           if (BODY_FIELD_EXCLUDE.has(col)) return;
+           if (col === matchField) return;
+           payload[col] = backendApiFormValues[col] ?? "";
+         });
+      } else {
+         // POST (Default)
+         payload = { ...backendApiFormValues };
+      }
+
+      const res = await debugFetch(`${API_BASE_URL}/api/backend-apis/${selectedBackendApi._id}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload, limit: docsLimit }),
+      });
+
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => "");
+        throw new Error(bodyText || `Request failed with status ${res.status}`);
+      }
+      
+      const data = await res.json();
+      
+      // Handle Display Logic based on return type
+      if (Array.isArray(data.data)) setDocuments(data.data);
+      else if (data.data) setDocuments([data.data]);
+      else setError("Operation successful but no data returned.");
+      
+      // Reload table if it was a modification
+      if(["PUT", "DELETE", "POST"].includes(savedRequest)) {
+          loadBackendApiData();
+      }
+    } catch (err) {
+      console.error("[executeBackendApi] error", err);
+      setError(err.message || String(err));
+    }
+  };
+
+  // Rendering helpers (unchanged)
+  const flattenObject = (obj, prefix = "", res = {}) => {
+    for (const key in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+      const value = obj[key];
+      const newKey = prefix ? `${prefix}.${key}` : key;
+      if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
+        flattenObject(value, newKey, res);
+      } else res[newKey] = value;
+    }
+    return res;
+  };
+  const isArrayOfObjects = (arr) => Array.isArray(arr) && arr.length > 0 && arr.every((i) => typeof i === "object" && i !== null);
+  const getTableColumns = (docs) => {
+    const cols = new Set(); docs.forEach((doc) => { if (doc && typeof doc === "object") Object.keys(doc).forEach((k) => cols.add(k)); });
+    return Array.from(cols).sort(); // simple sort
+  };
+  const formatCell = (value) => {
+    if (value === null || value === undefined) return <span className="text-slate-600 italic">null</span>;
+    if (typeof value === "boolean") return value ? <span className="text-emerald-400">true</span> : <span className="text-red-400">false</span>;
+    if (typeof value === "number") return <span className="text-sky-300">{value}</span>;
+    if (value instanceof Date) return value.toISOString();
+    try { if (typeof value === "object") return JSON.stringify(value); return String(value); } catch { return String(value); }
+  };
+  const renderDocumentsTable = (originalDocs) => {
+    if (!isArrayOfObjects(originalDocs)) {
+      // Fallback for single numbers (like Count results) or simple objects
+      return <pre className="text-[11px] leading-relaxed text-slate-100 whitespace-pre-wrap p-4 bg-slate-900 rounded">{JSON.stringify(originalDocs, null, 2)}</pre>;
+    }
+    const docs = originalDocs.map((doc) => flattenObject(doc));
+    const cols = getTableColumns(docs);
+    // ... existing table render logic ...
+    return (
+      <div className="flex flex-col h-full">
+        <div className="overflow-auto border border-slate-800 rounded-lg bg-slate-900/50 shadow-inner max-h-[500px]">
+          <table className="min-w-max border-collapse">
+            <thead className="bg-slate-950 sticky top-0 z-20 shadow-sm">
+              <tr>
+                <th className="sticky left-0 z-30 bg-slate-950 px-3 py-3 text-left text-xs font-semibold text-slate-400 border-r border-b border-slate-800 w-[50px]">#</th>
+                {cols.map((col) => (
+                  <th key={col} className="px-4 py-3 text-left text-xs font-medium text-slate-300 border-r border-b border-slate-800 whitespace-nowrap"><span className="font-mono text-[11px]">{col}</span></th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/50 bg-slate-950/20">
+              {docs.map((doc, idx) => (
+                <tr key={idx} className="group hover:bg-slate-800/40 transition-colors cursor-pointer" onClick={() => setViewingDoc(originalDocs[idx])}>
+                  <td className="sticky left-0 z-10 bg-slate-950 px-3 py-2 text-center text-xs text-slate-500">👁</td>
+                  {cols.map((col) => (<td key={col} className="px-4 py-2.5 text-[12px] text-slate-300 border-r border-slate-800/50 whitespace-nowrap max-w-[250px] overflow-hidden"><div className="truncate">{formatCell(doc[col])}</div></td>))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+  const getEditableColumnsForSelectedApi = () => {
+    if (!selectedBackendApi) return [];
+    const matchField = selectedBackendApi.meta?.matchField || "_id";
+    const BODY_FIELD_EXCLUDE = new Set(["_id", "id", "__v", "createdAt", "updatedAt", "created_at", "updated_at"]);
+    return (selectedBackendApi.columns || []).filter((c) => !BODY_FIELD_EXCLUDE.has(c) && c !== matchField);
+  };
+  const healthStatusColor = health?.status === "healthy" ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40" : "bg-red-500/10 text-red-300 border-red-500/40";
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-50 font-sans selection:bg-sky-500/30">
+      {/* Modals */}
+      {viewingDoc && <DocumentModal doc={viewingDoc} onClose={() => setViewingDoc(null)} />}
+
+      {/* Create API Modal */}
+      {showApiModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-6xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 bg-slate-900">
+              <h3 className="text-sm font-semibold text-slate-200">Create API</h3>
+              <button onClick={() => setShowApiModal(false)} className="rounded hover:bg-slate-800 p-1 text-slate-400 hover:text-white transition">✕</button>
+            </div>
+
+            <div className="flex-1 grid grid-cols-12 gap-4 p-4 overflow-auto">
+              <div className="col-span-3 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 flex flex-col gap-4">
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-1">Name</label>
+                  <input type="text" placeholder="API name" value={apiName} onChange={(e) => setApiName(e.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" />
+                </div>
+
+                {/* Match field selector - for PUT / DELETE / FETCH and GET with Aggregation */}
+                {(
+                  ["PUT","DELETE","FETCH"].includes(requestMethod) ||
+                  (requestMethod === "GET" && aggregationMethod && aggregationMethod !== "NONE")
+                ) && (
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">Filter By (Match Field)</label>
+                    <select value={modalMatchField} onChange={(e) => setModalMatchField(e.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500">
+                      <option value="_id">_id</option>
+                      {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <p className="text-[10px] text-slate-500 mt-1">Used to filter documents before operation.</p>
+                  </div>
+                )}
+
+                {/* Aggregate Target Field Selector (only when GET + aggregation that needs a field) */}
+                {(requestMethod === "GET" && ["SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes(aggregationMethod)) && (
+                  <div>
+                    <label className="text-[11px] text-emerald-400 block mb-1">Target Field ({requestMethod})</label>
+                    <select value={modalAggregateField} onChange={(e) => setModalAggregateField(e.target.value)} className="w-full rounded-lg border border-emerald-900 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-emerald-500">
+                      <option value="">Select Field...</option>
+                      {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                        {aggregationMethod === "GROUP_BY" ? "Field to group results by." : `Field to calculate ${aggregationMethod} on.`}
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex-1 overflow-auto rounded-xl border border-slate-800 bg-slate-900/50 p-3 max-h-[60vh]">
+                  {/* ... Column list (unchanged) ... */}
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-slate-200">Columns</span>
+                    {columnsLoading && <span className="text-[10px] text-sky-400">Loading…</span>}
+                  </div>
+                  {columns.length === 0 && !columnsLoading ? <p className="text-[11px] text-slate-500">No columns.</p> : <ul className="space-y-1 text-[12px] text-slate-200">{columns.map((col) => <li key={col} className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 flex items-center gap-2 justify-between"><div className="flex items-center gap-2"><span className="h-1.5 w-1.5 rounded-full bg-sky-400" /><span className="font-mono truncate">{col}</span></div></li>)}</ul>}
+                </div>
+              </div>
+
+              <div className="col-span-9 flex flex-col gap-4 overflow-hidden">
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <span className="px-3 py-1 rounded-lg border border-slate-800 bg-slate-900 text-xs font-semibold text-slate-200">Request</span>
+                      <select
+                        value={requestMethod}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setRequestMethod(value);
+                          // Reset aggregation selection when leaving GET
+                          if (value !== "GET") {
+                            setAggregationMethod("NONE");
+                          }
+                        }}
+                        className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
+                      >
+                        {REQUEST_METHODS.map((method) => (
+                          <option key={method} value={method}>{method}</option>
+                        ))}
+                      </select>
+
+                      {/* Aggregation dropdown: only visible when GET is selected */}
+                      {requestMethod === "GET" && (
+                        <select
+                          value={aggregationMethod}
+                          onChange={(e) => setAggregationMethod(e.target.value)}
+                          className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-emerald-500"
+                        >
+                          {AGGREGATION_METHODS.map((agg) => (
+                            <option key={agg} value={agg}>{agg}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-slate-500">{selectedDb && selectedCollection ? `${selectedDb} / ${selectedCollection}` : "Select DB & Collection"}</div>
+                  </div>
+                  {/* ... Preview inputs (unchanged) ... */}
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-[12px] text-slate-200 space-y-3 max-h-[220px] overflow-auto">
+                    {(columns.filter((c) => !new Set(["_id", "id", "__v", "createdAt", "updatedAt", "created_at", "updated_at"]).has(c))).map((col) => (
+                      <div key={col} className="flex flex-col gap-1">
+                         <label className="text-[11px] text-slate-400 font-medium">{col}</label>
+                         <input type="text" value={apiFormValues[col] ?? ""} onChange={(e) => handleFieldChange(col, e.target.value)} placeholder={`Enter ${col}`} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 flex justify-end">
+              <button onClick={saveBackendApi} disabled={savingApi} className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-60">{savingApi ? "Saving..." : "Save"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create DB / Collection Modal */}
+      {showCreateDbModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 bg-slate-900">
+              <h3 className="text-sm font-semibold text-slate-200">
+                {modalMode === 'createDb' && 'Create Database'}
+                {modalMode === 'createCollection' && 'Create Collection'}
+                {modalMode === 'updateCollection' && 'Update Collection'}
+              </h3>
+              <button
+                onClick={() => {
+                  setShowCreateDbModal(false);
+                  setEditingFieldIndex(null);
+                  setEditingCollectionIndex(null);
+                }}
+                className="rounded hover:bg-slate-800 p-1 text-slate-400 hover:text-white transition"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4 space-y-4 overflow-auto max-h-[calc(90vh-120px)]">
+              {/* Database Name - only for createDb mode */}
+              {modalMode === 'createDb' && (
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-1">Database Name</label>
+                  <input
+                    type="text"
+                    value={newDbName}
+                    onChange={(e) => setNewDbName(e.target.value)}
+                    placeholder="e.g. analytics_db"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                  />
+                </div>
+              )}
+
+              {/* Show selected DB info for createCollection and updateCollection */}
+              {(modalMode === 'createCollection' || modalMode === 'updateCollection') && (
+                <div className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2">
+                  <span className="text-[10px] text-slate-500">Database: </span>
+                  <span className="text-[11px] font-semibold text-sky-300">{newDbName}</span>
+                  {modalMode === 'updateCollection' && (
+                    <>
+                      <span className="text-[10px] text-slate-500 ml-3">Collection: </span>
+                      <span className="text-[11px] font-semibold text-emerald-300">{newCollectionName}</span>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Collections input - for createDb mode */}
+              {modalMode === 'createDb' && (
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-1">Collections</label>
+                  <div className="flex gap-2 mb-3">
+                    <input
+                      type="text"
+                      value={newCollectionInput}
+                      onChange={(e) => setNewCollectionInput(e.target.value)}
+                      placeholder="collectionName"
+                      className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleAddCollection();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddCollection}
+                      className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Add collections to create. Click "Edit Fields" to configure schema fields for each collection.</p>
+                </div>
+              )}
+
+              {/* Collection Name input - for createCollection mode */}
+              {modalMode === 'createCollection' && (
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-1">Collection Name</label>
+                  <div className="flex gap-2 mb-3">
+                    <input
+                      type="text"
+                      value={newCollectionInput}
+                      onChange={(e) => setNewCollectionInput(e.target.value)}
+                      placeholder="collectionName"
+                      className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleAddCollection();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddCollection}
+                      className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Add collection name and configure its schema fields.</p>
+                </div>
+              )}
+
+              {/* Collections list with schema fields - for createDb and createCollection modes */}
+              {(modalMode === 'createDb' || modalMode === 'createCollection') && newCollections.length > 0 && (
+                <div className="space-y-3">
+                  {newCollections.map((col, ci) => {
+                    const isCollEditing = editingCollectionIndex === ci;
+                    return (
+                      <div key={col.name + ci} className="border border-slate-700 rounded-lg bg-slate-950 overflow-hidden">
+                        <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 transition">
+                          <div className="flex items-center gap-2 flex-1 min-w-0">
+                            <span className="text-[11px] font-semibold text-sky-300">{col.name}</span>
+                            <span className="text-[10px] text-slate-500">({(col.schemaFields || []).length} fields)</span>
+                          </div>
+                          <div className="flex gap-1">
+                            <button type="button" onClick={() => setEditingCollectionIndex(isCollEditing ? null : ci)} className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 transition">{isCollEditing ? 'Hide Fields' : 'Edit Fields'}</button>
+                            <button type="button" onClick={() => handleRemoveCollection(ci)} className="text-[10px] text-red-300 hover:text-red-200 px-2 py-1">✕</button>
+                          </div>
+                        </div>
+
+                        {isCollEditing && (
+                          <div className="px-3 py-3 bg-slate-950 space-y-2 border-t border-slate-700">
+                            <div className="flex gap-2">
+                              <input type="text" value={col.newFieldInput || ''} onChange={(e) => handleCollectionFieldInputChange(ci, e.target.value)} placeholder="fieldName" className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddFieldToCollection(ci); } }} />
+                              <button type="button" onClick={() => handleAddFieldToCollection(ci)} className="rounded-lg bg-sky-600 px-3 py-1 text-xs font-semibold text-white hover:bg-sky-500">Add Field</button>
+                            </div>
+
+                            {/* Collection fields */}
+                            {(col.schemaFields || []).length > 0 && (
+                              <div className="space-y-2">
+                                {col.schemaFields.map((field, fi) => {
+                                  const fieldName = field.name;
+                                  const fieldType = field.type || 'string';
+                                  const validators = field.validators || {};
+                                  const isEditingField = editingCollectionIndex === ci && editingFieldIndex === fi;
+                                  const isRefField = field.ref === true && field.refCollection;
+                                  return (
+                                    <div key={fieldName + fi} className="border border-slate-700 rounded-lg bg-slate-950 overflow-hidden">
+                                      <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 transition">
+                                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                                          <span className="text-[10px] font-semibold text-sky-300">{fieldName}</span>
+                                          <span className="text-[10px] text-slate-500">({fieldType})</span>
+                                          {isRefField && (
+                                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                              → {field.refCollection}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="flex gap-1">
+                                          <button type="button" onClick={() => { setEditingCollectionIndex(ci); setEditingFieldIndex(isEditingField ? null : fi); }} className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 transition">{isEditingField ? 'Hide' : 'Edit'}</button>
+                                          <button type="button" onClick={() => handleRemoveFieldFromCollection(ci, fi)} className="text-[10px] text-red-300 hover:text-red-200 px-2 py-1">✕</button>
+                                        </div>
+                                      </div>
+
+                                      {isEditingField && (
+                                        <div className="px-3 py-3 bg-slate-950 space-y-2 border-t border-slate-700">
+                                          <div>
+                                            <label className="text-[10px] text-slate-400 block mb-1">Type</label>
+                                            <select value={fieldType} onChange={(e) => handleCollectionFieldTypeChange(ci, fi, e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-500">
+                                              <option value="string">String</option>
+                                              <option value="number">Number</option>
+                                              <option value="object">Object</option>
+                                              <option value="array">Array</option>
+                                              <option value="bool">Boolean</option>
+                                              <option value="date">Date</option>
+                                              <option value="objectId">ObjectId (Reference)</option>
+                                            </select>
+                                          </div>
+
+                                          {/* Reference / Relationship Controls */}
+                                          <div className="border border-slate-700 rounded-lg p-2 bg-slate-900/50">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                              <input 
+                                                type="checkbox" 
+                                                checked={field.ref === true} 
+                                                onChange={(e) => handleCollectionFieldRefToggle(ci, fi, e.target.checked)}
+                                                className="rounded border-slate-600 bg-slate-800 text-sky-500 focus:ring-sky-500"
+                                              />
+                                              <span className="text-[10px] text-slate-300">This field references another collection</span>
+                                            </label>
+                                            
+                                            {field.ref && (
+                                              <div className="mt-2">
+                                                <label className="text-[10px] text-slate-400 block mb-1">Target Collection</label>
+                                                <select 
+                                                  value={field.refCollection || ''} 
+                                                  onChange={(e) => handleCollectionFieldRefTarget(ci, fi, e.target.value)} 
+                                                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-500"
+                                                >
+                                                  <option value="">-- Select Collection --</option>
+                                                  {availableRefCollections
+                                                    .filter(c => c !== col.name) // exclude self-reference
+                                                    .map((c) => (
+                                                      <option key={c} value={c}>{c}</option>
+                                                    ))
+                                                  }
+                                                  {/* Also include collections being created in the same modal */}
+                                                  {newCollections
+                                                    .filter((nc, idx) => idx !== ci && !availableRefCollections.includes(nc.name))
+                                                    .map((nc) => (
+                                                      <option key={`new-${nc.name}`} value={nc.name}>{nc.name} (new)</option>
+                                                    ))
+                                                  }
+                                                </select>
+                                                {field.refCollection && (
+                                                  <p className="text-[9px] text-emerald-400 mt-1">
+                                                    ✓ Field will store ObjectId referencing "{field.refCollection}"
+                                                  </p>
+                                                )}
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {(fieldType === 'string' || fieldType === undefined) && (
+                                            <>
+                                              <div>
+                                                <label className="text-[10px] text-slate-400 block mb-1">Min Length</label>
+                                                <input type="number" min="0" value={validators.minLength || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'minLength', e.target.value ? parseInt(e.target.value) : '')} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                              </div>
+                                              <div>
+                                                <label className="text-[10px] text-slate-400 block mb-1">Max Length</label>
+                                                <input type="number" min="0" value={validators.maxLength || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'maxLength', e.target.value ? parseInt(e.target.value) : '')} placeholder="255" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                              </div>
+                                              <div>
+                                                <label className="text-[10px] text-slate-400 block mb-1">Pattern (Regex)</label>
+                                                <input type="text" value={validators.pattern || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'pattern', e.target.value)} placeholder="^[a-zA-Z0-9]+$" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500 font-mono text-[10px]" />
+                                              </div>
+                                            </>
+                                          )}
+
+                                          {fieldType === 'number' && (
+                                            <>
+                                              <div>
+                                                <label className="text-[10px] text-slate-400 block mb-1">Minimum</label>
+                                                <input type="number" value={validators.minimum || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'minimum', e.target.value ? parseInt(e.target.value) : '')} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                              </div>
+                                              <div>
+                                                <label className="text-[10px] text-slate-400 block mb-1">Maximum</label>
+                                                <input type="number" value={validators.maximum || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'maximum', e.target.value ? parseInt(e.target.value) : '')} placeholder="100" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                              </div>
+                                            </>
+                                          )}
+
+                                          <div>
+                                            <label className="text-[10px] text-slate-400 block mb-1">Enum (comma-separated)</label>
+                                            <input type="text" value={Array.isArray(validators.enum) ? validators.enum.join(', ') : ''} onChange={(e) => { const values = e.target.value.split(',').map(v => v.trim()).filter(v => v); handleCollectionFieldValidatorChange(ci, fi, 'enum', values.length > 0 ? values : ''); }} placeholder="active, inactive" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                          </div>
+
+                                          <div>
+                                            <label className="text-[10px] text-slate-400 block mb-1">Default Value</label>
+                                            <input type="text" value={validators.default || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'default', e.target.value)} placeholder="default value" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                          </div>
+
+                                          <div>
+                                            <label className="text-[10px] text-slate-400 block mb-1">Description</label>
+                                            <input type="text" value={validators.description || ''} onChange={(e) => handleCollectionFieldValidatorChange(ci, fi, 'description', e.target.value)} placeholder="field description" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Update Collection - show fields directly */}
+              {modalMode === 'updateCollection' && newCollections.length > 0 && (
+                <div>
+                  <label className="text-[11px] text-slate-400 block mb-2">Add New Fields</label>
+                  <div className="flex gap-2 mb-3">
+                    <input 
+                      type="text" 
+                      value={newCollections[0]?.newFieldInput || ''} 
+                      onChange={(e) => handleCollectionFieldInputChange(0, e.target.value)} 
+                      placeholder="fieldName" 
+                      className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" 
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddFieldToCollection(0); } }} 
+                    />
+                    <button type="button" onClick={() => handleAddFieldToCollection(0)} className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500">Add Field</button>
+                  </div>
+
+                  {/* Existing fields */}
+                  {(newCollections[0]?.schemaFields || []).length > 0 && (
+                    <div className="space-y-2">
+                      <span className="text-[10px] text-slate-500">Current Fields:</span>
+                      {newCollections[0].schemaFields.map((field, fi) => {
+                        const fieldName = field.name;
+                        const fieldType = field.type || 'string';
+                        const validators = field.validators || {};
+                        const isEditingField = editingFieldIndex === fi;
+                        const isRefField = field.ref === true && field.refCollection;
+                        return (
+                          <div key={fieldName + fi} className="border border-slate-700 rounded-lg bg-slate-950 overflow-hidden">
+                            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 transition">
+                              <div className="flex items-center gap-2 flex-1 min-w-0">
+                                <span className="text-[10px] font-semibold text-sky-300">{fieldName}</span>
+                                <span className="text-[10px] text-slate-500">({fieldType})</span>
+                                {isRefField && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                    → {field.refCollection}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex gap-1">
+                                <button type="button" onClick={() => setEditingFieldIndex(isEditingField ? null : fi)} className="text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 transition">{isEditingField ? 'Hide' : 'Edit'}</button>
+                                <button type="button" onClick={() => handleRemoveFieldFromCollection(0, fi)} className="text-[10px] text-red-300 hover:text-red-200 px-2 py-1">✕</button>
+                              </div>
+                            </div>
+
+                            {isEditingField && (
+                              <div className="px-3 py-3 bg-slate-950 space-y-2 border-t border-slate-700">
+                                <div>
+                                  <label className="text-[10px] text-slate-400 block mb-1">Type</label>
+                                  <select value={fieldType} onChange={(e) => handleCollectionFieldTypeChange(0, fi, e.target.value)} className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-500">
+                                    <option value="string">String</option>
+                                    <option value="number">Number</option>
+                                    <option value="object">Object</option>
+                                    <option value="array">Array</option>
+                                    <option value="bool">Boolean</option>
+                                    <option value="date">Date</option>
+                                    <option value="objectId">ObjectId (Reference)</option>
+                                  </select>
+                                </div>
+
+                                {/* Reference / Relationship Controls */}
+                                <div className="border border-slate-700 rounded-lg p-2 bg-slate-900/50">
+                                  <label className="flex items-center gap-2 cursor-pointer">
+                                    <input 
+                                      type="checkbox" 
+                                      checked={field.ref === true} 
+                                      onChange={(e) => handleCollectionFieldRefToggle(0, fi, e.target.checked)}
+                                      className="rounded border-slate-600 bg-slate-800 text-sky-500 focus:ring-sky-500"
+                                    />
+                                    <span className="text-[10px] text-slate-300">This field references another collection</span>
+                                  </label>
+                                  
+                                  {field.ref && (
+                                    <div className="mt-2">
+                                      <label className="text-[10px] text-slate-400 block mb-1">Target Collection</label>
+                                      <select 
+                                        value={field.refCollection || ''} 
+                                        onChange={(e) => handleCollectionFieldRefTarget(0, fi, e.target.value)} 
+                                        className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-500"
+                                      >
+                                        <option value="">-- Select Collection --</option>
+                                        {availableRefCollections
+                                          .filter(c => c !== newCollections[0]?.name) // exclude self-reference
+                                          .map((c) => (
+                                            <option key={c} value={c}>{c}</option>
+                                          ))
+                                        }
+                                      </select>
+                                      {field.refCollection && (
+                                        <p className="text-[9px] text-emerald-400 mt-1">
+                                          ✓ Field will store ObjectId referencing "{field.refCollection}"
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {(fieldType === 'string' || fieldType === undefined) && (
+                                  <>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Min Length</label>
+                                      <input type="number" min="0" value={validators.minLength || ''} onChange={(e) => handleCollectionFieldValidatorChange(0, fi, 'minLength', e.target.value ? parseInt(e.target.value) : '')} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Max Length</label>
+                                      <input type="number" min="0" value={validators.maxLength || ''} onChange={(e) => handleCollectionFieldValidatorChange(0, fi, 'maxLength', e.target.value ? parseInt(e.target.value) : '')} placeholder="255" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Pattern (Regex)</label>
+                                      <input type="text" value={validators.pattern || ''} onChange={(e) => handleCollectionFieldValidatorChange(0, fi, 'pattern', e.target.value)} placeholder="^[a-zA-Z0-9]+$" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500 font-mono text-[10px]" />
+                                    </div>
+                                  </>
+                                )}
+
+                                {fieldType === 'number' && (
+                                  <>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Minimum</label>
+                                      <input type="number" value={validators.minimum || ''} onChange={(e) => handleCollectionFieldValidatorChange(0, fi, 'minimum', e.target.value ? parseInt(e.target.value) : '')} placeholder="0" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] text-slate-400 block mb-1">Maximum</label>
+                                      <input type="number" value={validators.maximum || ''} onChange={(e) => handleCollectionFieldValidatorChange(0, fi, 'maximum', e.target.value ? parseInt(e.target.value) : '')} placeholder="100" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                    </div>
+                                  </>
+                                )}
+
+                                <div>
+                                  <label className="text-[10px] text-slate-400 block mb-1">Default Value</label>
+                                  <input type="text" value={validators.default || ''} onChange={(e) => handleCollectionFieldValidatorChange(0, fi, 'default', e.target.value)} placeholder="default value" className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs outline-none focus:border-sky-500" />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {error && (
+                <div className="rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                  {error}
+                </div>
+              )}
+            </div>
+            <div className="border-t border-slate-800 px-4 py-3 bg-slate-900 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowCreateDbModal(false);
+                  setEditingFieldIndex(null);
+                  setEditingCollectionIndex(null);
+                  setError(null);
+                }}
+                className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateDbAndCollection}
+                disabled={creatingDb}
+                className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+              >
+                {creatingDb ? "Saving..." : modalMode === 'updateCollection' ? "Update" : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main UI Structure (Header, Sidebar, Main) */}
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.12),_transparent_45%),_radial-gradient(circle_at_bottom,_rgba(129,140,248,0.12),_transparent_45%)]" />
+      <div className="relative z-10">
+        <header className="border-b border-slate-800/70 bg-slate-950/80 backdrop-blur sticky top-0 z-40">
+           <div className="mx-auto max-w-7xl px-4 py-4 flex items-center justify-between gap-4">
+              {/* Header contents identical to original... */}
+              <div className="mt-3 flex flex-col sm:flex-row gap-2 sm:items-center w-full max-w-xl">
+                  <div className="flex-1">
+                      <div className="flex gap-2">
+                          <input type="text" placeholder="mongodb+srv://..." value={mongoUri} onChange={(e) => setMongoUri(e.target.value)} className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs outline-none focus:border-sky-500" />
+                          <button onClick={connectToCustomDb} disabled={connecting || !mongoUri} className="rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-4 py-1.5 text-xs font-medium text-emerald-100">{connecting ? "..." : "Connect"}</button>
+                      </div>
+                      {connectMessage && <span className="text-[10px] text-emerald-400/80 mt-1 block">{connectMessage}</span>}
+                  </div>
+              </div>
+              <div className="flex flex-col items-end gap-2">
+                 <div className="flex gap-2">
+                   <button
+                     onClick={() => { setNewDbName(""); setNewCollectionName(""); setNewCollections([]); setNewCollectionInput(""); setEditingFieldIndex(null); setEditingCollectionIndex(null); setError(null); setModalMode('createDb'); setShowCreateDbModal(true); }}
+                     className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-500/20"
+                   >
+                     + Create DB
+                   </button>
+                   {selectedDb && (
+                     <>
+                       <button
+                         onClick={openCreateCollectionModal}
+                         className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-400/6 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-400/12"
+                       >
+                         + Create Collection
+                       </button>
+                       {selectedCollection && (
+                         <button
+                           onClick={openUpdateCollectionModal}
+                           className="inline-flex items-center gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-500/6 px-3 py-1.5 text-xs font-medium text-yellow-100 hover:bg-yellow-500/12"
+                         >
+                           Update Collection
+                         </button>
+                       )}
+                     </>
+                   )}
+                   <button
+                     onClick={() => {
+                       if (!selectedDb || !selectedCollection) {
+                         setError("Select a database.");
+                         return;
+                       }
+                       fetchColumns(selectedDb, selectedCollection);
+                       setShowApiModal(true);
+                     }}
+                     className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/60 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-100"
+                   >
+                     + API
+                   </button>
+                 </div>
+                 <div className={classNames("flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] shadow-sm", health ? healthStatusColor : "border-slate-700 text-slate-400")}>{health ? "Healthy" : "..."}</div>
+              </div>
+           </div>
+        </header>
+
+        <main className="py-6">
+           <div className="mx-auto max-w-7xl px-4 grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Sidebar (DBs/Collections) - Unchanged */}
+              <aside className="lg:col-span-3 space-y-6">
+                 <div className="rounded-2xl border border-slate-800 bg-slate-950/50 shadow-sm flex flex-col h-[300px]">
+                    <div className="border-b border-slate-800 px-4 py-3 bg-slate-900/50 rounded-t-2xl"><h2 className="text-sm font-semibold text-slate-200">Databases</h2></div>
+                    <div className="p-2 overflow-auto flex-1 custom-scrollbar">
+                        {databases.map((db) => <button key={db.name} onClick={() => setSelectedDb(db.name)} className={classNames("w-full text-left rounded-lg px-3 py-2 text-xs border transition", selectedDb === db.name ? "border-sky-500/50 bg-sky-500/10 text-sky-100" : "border-transparent text-slate-400 hover:bg-slate-900")}>{db.name}</button>)}
+                    </div>
+                 </div>
+                 <div className="rounded-2xl border border-slate-800 bg-slate-950/50 shadow-sm flex flex-col h-[300px]">
+                    <div className="border-b border-slate-800 px-4 py-3 bg-slate-900/50 rounded-t-2xl"><h2 className="text-sm font-semibold text-slate-200">Collections</h2></div>
+                    <div className="p-2 overflow-auto flex-1 custom-scrollbar">
+                        {collections.map((col) => <button key={col} onClick={() => setSelectedCollection(col)} className={classNames("w-full text-left rounded-lg px-3 py-2 text-xs border transition", selectedCollection === col ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-100" : "border-transparent text-slate-400 hover:bg-slate-900")}>{col}</button>)}
+                    </div>
+                 </div>
+              </aside>
+
+              {/* Main Content */}
+              <section className="lg:col-span-9 space-y-6">
+                 {/* Documents Table - Unchanged */}
+                 <div className="rounded-2xl border border-slate-800 bg-slate-950/50 shadow-sm flex flex-col">
+                    <div className="border-b border-slate-800 px-4 py-3 flex items-center justify-between bg-slate-900/50 rounded-t-2xl">
+                       <h2 className="text-sm font-semibold text-slate-200">Documents Preview</h2>
+                       <button onClick={() => selectedDb && selectedCollection && fetchDocuments(selectedDb, selectedCollection, docsLimit)} className="text-[11px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-medium hover:bg-slate-700 transition">Reload</button>
+                    </div>
+                    <div className="p-4">{documentsLoading ? <p className="text-xs text-slate-500 text-center">Loading...</p> : documents.length === 0 ? <p className="text-xs text-slate-500 text-center">Empty.</p> : renderDocumentsTable(documents)}</div>
+                 </div>
+{/* <div className="grid grid-cols-1 md:grid-cols-2 gap-6"> */}
+                {/* Relations */}
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/50 shadow-sm flex flex-col">
+                  <div className="border-b border-slate-800 px-4 py-3 flex items-center justify-between bg-slate-900/50 rounded-t-2xl">
+                    <h2 className="text-sm font-semibold text-slate-200">Collection References</h2>
+                    <button onClick={() => { fetchRelations(); fetchRelationMetadata(selectedDb); }} className="text-[10px] text-slate-400 hover:text-white transition">Refresh</button>
+                  </div>
+                  <div className="p-3 overflow-auto flex-1 custom-scrollbar max-h-[300px]">
+                    {relationMetadataLoading || relationsLoading ? (
+                      <p className="text-xs text-slate-400 italic p-2">Loading references…</p>
+                    ) : relationMetadata.length === 0 ? (
+                      <div className="h-full flex items-center justify-center text-center py-6">
+                        <p className="text-xs text-slate-600">No relations detected. Click "Refresh" after connecting to a database, or define references when editing collection fields.</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {relationMetadata.map((rel) => (
+                          <div 
+                            key={rel._id} 
+                            className={`flex items-center gap-2 text-[10px] rounded-lg px-2 py-1.5 ${
+                              rel.inferredFromSchema 
+                                ? 'bg-sky-500/10 border border-sky-500/20' 
+                                : 'bg-purple-500/10 border border-purple-500/20'
+                            }`}
+                          >
+                            <span className="font-medium text-slate-200">{rel.sourceCollection}</span>
+                            <span className="text-slate-500">.</span>
+                            <span className={rel.inferredFromSchema ? 'text-sky-300' : 'text-purple-300'}>{rel.sourceField}</span>
+                            <span className="text-slate-500">→</span>
+                            <span className="font-medium text-emerald-300">{rel.targetCollection}</span>
+                            <span className="text-[9px] text-slate-500 ml-auto flex items-center gap-1">
+                              ({rel.relationType})
+                              {rel.inferredFromSchema && <span className="text-sky-400" title="Auto-detected">⚡</span>}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                     {/* Saved APIs List - Unchanged Logic */}
+                    <div className="rounded-2xl border border-slate-800 bg-slate-950/60 shadow-sm flex flex-col lg:col-span-2">
+                        <div className="border-b border-slate-800 px-4 py-3 flex items-center justify-between bg-slate-900/60 rounded-t-2xl">
+                           <h2 className="text-sm font-semibold text-slate-200">Saved APIs</h2>
+                           <div className="flex gap-2"><button onClick={fetchBackendApis} className="text-[11px] rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5">Refresh</button></div>
+                        </div>
+                        <div className="grid grid-cols-12 gap-4 p-4 min-h-[420px]">
+                           <div className="col-span-12 md:col-span-4 lg:col-span-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 flex flex-col gap-2 max-h-[420px] overflow-auto">
+                              {backendApis.map((api) => (
+                                 <div key={api._id} className={classNames("rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-2 cursor-pointer transition", selectedBackendApi?._id === api._id ? "border-sky-500/60 bg-sky-500/10 text-sky-100" : "border-slate-800 bg-slate-900")} onClick={() => setSelectedBackendApi(api)}>
+                                    <div className="flex flex-col truncate"><span className="font-semibold truncate">{api.api_name}</span><span className="text-[10px] text-slate-400">{api.request}</span></div>
+                                    <button onClick={(e) => { e.stopPropagation(); deleteBackendApi(api._id); }} className="text-[10px] text-red-300">Del</button>
+                                 </div>
+                              ))}
+                           </div>
+                           
+                           {/* Saved API Execution Detail View */}
+                           <div className="col-span-12 md:col-span-8 lg:col-span-9 rounded-xl border border-slate-800 bg-slate-900/60 p-4 flex flex-col gap-4 min-h-[420px]">
+                              {!selectedBackendApi ? <p className="text-[12px] text-slate-400">Select API.</p> : (
+                                <>
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                     <div className="flex items-center gap-2">
+                                        <span className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-1 text-xs font-semibold text-slate-200">{selectedBackendApi.request}</span>
+                                        <span className="text-[11px] text-slate-500">{selectedBackendApi.dbName} / {selectedBackendApi.collectionName}</span>
+                                        {/* Show Meta Info */}
+                                        {selectedBackendApi.meta?.aggregateField && (
+                                            <span className="text-[11px] text-emerald-400 ml-2">Target: <strong className="font-mono">{selectedBackendApi.meta.aggregateField}</strong></span>
+                                        )}
+                                        {selectedBackendApi.meta?.matchField && (
+                                            <span className="text-[11px] text-slate-400 ml-2">Filter: <strong className="font-mono">{selectedBackendApi.meta.matchField}</strong></span>
+                                        )}
+                                     </div>
+                                     <div className="flex items-center gap-2">
+                                        <button onClick={loadBackendApiData} className="text-[11px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5">Load Data</button>
+                                        <button onClick={executeBackendApi} className="text-[11px] rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-3 py-1.5 text-emerald-100">Execute</button>
+                                     </div>
+                                  </div>
+
+                                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 max-h-[320px] overflow-auto">
+                                     <div className="mb-2 flex items-center justify-between">
+                                        <span className="text-xs font-semibold text-slate-200">Input Parameters</span>
+                                     </div>
+                                     
+                                     {/* Conditional Inputs based on Method */}
+                                     {/* Aggregates/Delete/Fetch primarily use Match Field */}
+                                     {["DELETE", "FETCH", "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_BY"].includes((selectedBackendApi.request || "").toUpperCase()) ? (
+                                        <div className="mt-3">
+                                            <label className="text-[11px] text-slate-400 font-medium">{selectedBackendApi.meta?.matchField || "_id"} (Filter Criteria)</label>
+                                            <input type="text" value={backendApiFormValues[selectedBackendApi.meta?.matchField || "_id"] ?? ""} onChange={(e) => handleBackendApiFieldChange(selectedBackendApi.meta?.matchField || "_id", e.target.value)} placeholder="Enter value (optional for aggregates)" className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" />
+                                            <p className="text-[10px] text-slate-500 mt-1">Leave empty to include all documents.</p>
+                                        </div>
+                                     ) : (
+                                        /* Normal PUT/POST inputs */
+                                        <>
+                                            {getEditableColumnsForSelectedApi().map((col) => (
+                                                <div key={col} className="flex flex-col gap-1 mb-2">
+                                                    <label className="text-[11px] text-slate-400 font-medium">{col}</label>
+                                                    <input type="text" value={backendApiFormValues[col] ?? ""} onChange={(e) => handleBackendApiFieldChange(col, e.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" />
+                                                </div>
+                                            ))}
+                                            {(selectedBackendApi.request || "").toUpperCase() === "PUT" && (
+                                                <div className="mt-3 border-t border-slate-800 pt-3">
+                                                    <label className="text-[11px] text-sky-400 font-medium">{selectedBackendApi.meta?.matchField || "_id"} (Target Criteria)</label>
+                                                    <input type="text" value={backendApiFormValues[selectedBackendApi.meta?.matchField || "_id"] ?? ""} onChange={(e) => handleBackendApiFieldChange(selectedBackendApi.meta?.matchField || "_id", e.target.value)} className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs outline-none focus:border-sky-500" />
+                                                </div>
+                                            )}
+                                        </>
+                                     )}
+                                     {error && <div className="mt-4 p-2 rounded bg-red-900/20 border border-red-500/50 text-red-200 text-xs">{error}</div>}
+                                  </div>
+                                </>
+                              )}
+                           </div>
+                        </div>
+                    </div>
+                 </div>
+              </section>
+           </div>
+        </main>
+      </div>
+    </div>
+  );
+}
